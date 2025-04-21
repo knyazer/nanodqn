@@ -13,6 +13,7 @@ import numpy as np
 import optax
 import tyro
 from flax.training.train_state import TrainState
+from tqdm.auto import tqdm
 
 
 @dataclass
@@ -25,7 +26,7 @@ class Args:
     """if toggled, this experiment will be tracked with Weights and Biases; on by default"""
     wandb_project_name: str = "nanodqn"
     """the wandb's project name"""
-    capture_video: bool = False
+    capture_video: bool = True
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
@@ -65,7 +66,12 @@ def make_env(env_id, seed, idx, capture_video, run_name):
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+            # We'll manually control when videos are recorded
+            env = gym.wrappers.RecordVideo(
+                env,
+                f"videos/{run_name}",
+                episode_trigger=lambda x: False,  # Disable automatic recording
+            )
         else:
             env = gym.make(env_id)
         env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -111,7 +117,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         )
     args = tyro.cli(Args)
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    run_name = f"{args.env_id}_{hex(int(time.time()) % 65536)}"
     if args.track:
         import wandb
 
@@ -185,11 +191,22 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         q_state = q_state.apply_gradients(grads=grads)
         return loss_value, q_pred, q_state
 
-    start_time = time.time()
+    start_time = time.time()  # start timer for SPS (steps-per-second) computation
+    last_mean_rs = 0  # the average reward, reporting purposes
 
     # TRY NOT TO MODIFY: start the game
     obs, _ = envs.reset(seed=args.seed)
-    for global_step in range(args.total_timesteps):
+    progress_bar = tqdm(range(args.total_timesteps))
+
+    # For recording videos at 10% intervals
+    video_interval = args.total_timesteps // 10
+    video_checkpoints = set(
+        i * video_interval for i in range(1, 11)
+    )  # 10%, 20%, ..., 100%
+    last_video_path = None
+
+    for global_step in progress_bar:
+        wandb.log({})  # commit to wandb
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(
             args.start_e,
@@ -209,33 +226,91 @@ poetry run pip install "stable_baselines3==2.0.0a1"
         # TRY NOT TO MODIFY: execute the game and log data.
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
-        # TRY NOT TO MODIFY: record rewards for plotting purposes
+        # record rewards for reporting purposes
+        rs, ls = [], []
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if info and "episode" in info:
-                    print(
-                        f"global_step={global_step}, episodic_return={info['episode']['r']}"
-                    )
-                    if args.track:
-                        wandb.log(
-                            {
-                                "charts/episodic_return": info["episode"]["r"],
-                                "charts/episodic_length": info["episode"]["l"],
-                            },
-                            step=global_step,
-                        )
+                    rs.append(info["episode"]["r"])
+                    ls.append(info["episode"]["l"])
 
-        # TRY NOT TO MODIFY: save data to reply buffer; handle `final_observation`
+            current_mean = jnp.array(rs).mean()
+            if last_mean_rs == 0:
+                last_mean_rs = current_mean
+            last_mean_rs = current_mean * 0.01 + 0.99 * last_mean_rs
+
+            if args.track:  # post updates into wandb
+                wandb.log(
+                    {
+                        "charts/episodic_return": jnp.array(rs).mean(),
+                        "charts/episodic_length": jnp.array(ls).mean(),
+                    },
+                    commit=False,
+                )
+
+        if global_step % 200 == 0:  # print pretty updates into tty
+            progress_bar.set_description_str(f"Reward: {float(last_mean_rs):.2f}")
+
+        # save data to reply buffer; handle `final_observation`
         real_next_obs = next_obs.copy()
         for idx, trunc in enumerate(truncations):
             if trunc:
                 real_next_obs[idx] = infos["final_observation"][idx]
         rb.add(obs, real_next_obs, actions, rewards, terminations, infos)
 
-        # TRY NOT TO MODIFY: CRUCIAL step easy to overlook
+        # CRUCIAL step easy to overlook, moving to the new observations
         obs = next_obs
 
-        # ALGO LOGIC: training.
+        # Record and upload video at 10% intervals if video capture is enabled
+        if args.capture_video and args.track and global_step in video_checkpoints:
+            # Trigger video recording for the next episode
+            progress_bar.write(
+                f"Recording video at {global_step/args.total_timesteps*100:.0f}% of training"
+            )
+            env_vec = envs.envs[
+                0
+            ]  # Get the first environment (we're only recording one)
+
+            env_vec.start_video_recorder()
+
+            # Run one episode to record
+            episode_done = False
+            episode_obs, _ = env_vec.reset()
+            while not episode_done:
+                episode_action = (
+                    envs.single_action_space.sample()
+                    if random.random() < 0.1
+                    else q_network.apply(q_state.params, episode_obs[None]).argmax(
+                        axis=-1
+                    )[0]
+                )
+                episode_obs, _, episode_term, episode_trunc, _ = env_vec.step(
+                    jax.device_get(episode_action)
+                )
+                episode_done = episode_term or episode_trunc
+            env_vec.reset()
+
+            # Stop recording and get the video path
+            video_path = env_vec.video_recorder.path
+
+            # Wait for the file to be fully written
+            time.sleep(0.3)
+
+            # Upload the video to wandb
+            if os.path.exists(video_path):
+                wandb.log(
+                    {"video": wandb.Video(video_path, format="mp4")},
+                    commit=False,
+                )
+                progress_bar.write(
+                    f"Uploaded video at {global_step/args.total_timesteps*100:.0f}% of training"
+                )
+            else:
+                progress_bar.write(
+                    f"Failed to save the video at {global_step/args.total_timesteps*100:.0f}% of training"
+                )
+
+        # training process
         if global_step > args.learning_starts:
             if global_step % args.train_frequency == 0:
                 data = rb.sample(args.batch_size)
@@ -249,9 +324,13 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                     data.dones.flatten().numpy(),
                 )
 
-                if global_step % 100 == 0:
+                if global_step % 1000 == 0:  # more reporting
                     sps = int(global_step / (time.time() - start_time))
-                    print("SPS:", sps)
+                    progress_bar.set_postfix(
+                        SPS=sps,
+                        loss=f"{float(jax.device_get(loss).squeeze()):.3f}",
+                        epsilon=f"{epsilon:.2f}",
+                    )
 
                     if args.track:
                         wandb.log(
@@ -260,7 +339,7 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                                 "losses/q_values": jax.device_get(old_val).mean(),
                                 "charts/SPS": sps,
                             },
-                            step=global_step,
+                            commit=False,
                         )
 
             # update target network
@@ -271,11 +350,11 @@ poetry run pip install "stable_baselines3==2.0.0a1"
                     )
                 )
 
-    if args.save_model:
+    if args.save_model:  # even more reporting
         model_path = f"runs/{run_name}/{args.exp_name}.nanodqn_model"
         with open(model_path, "wb") as f:
             f.write(flax.serialization.to_bytes(q_state.params))
-        print(f"model saved to {model_path}")
+        progress_bar.write(f"Model saved to {model_path}")
         from cleanrl_utils.evals.dqn_jax_eval import evaluate
 
         episodic_returns = evaluate(
