@@ -298,10 +298,6 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
             # Upload the video to wandb
             if os.path.exists(video_path):
-                wandb.log(
-                    {"video": wandb.Video(video_path, format="mp4")},
-                    commit=False,
-                )
                 progress_bar.write(
                     f"Uploaded video at {global_step/args.total_timesteps*100:.0f}% of training"
                 )
