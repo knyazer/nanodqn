@@ -68,9 +68,7 @@ def make_env(env_id, seed, idx, capture_video, run_name):
             env = gym.make(env_id, render_mode="rgb_array")
             # We'll manually control when videos are recorded
             env = gym.wrappers.RecordVideo(
-                env,
-                f"videos/{run_name}",
-                episode_trigger=lambda x: False,  # Disable automatic recording
+                env, f"videos/{run_name}", step_trigger=lambda s: s % 50000 == 49999
             )
         else:
             env = gym.make(env_id)
@@ -260,51 +258,6 @@ poetry run pip install "stable_baselines3==2.0.0a1"
 
         # CRUCIAL step easy to overlook, moving to the new observations
         obs = next_obs
-
-        # Record and upload video at 10% intervals if video capture is enabled
-        if args.capture_video and args.track and global_step in video_checkpoints:
-            # Trigger video recording for the next episode
-            progress_bar.write(
-                f"Recording video at {global_step/args.total_timesteps*100:.0f}% of training"
-            )
-            env_vec = envs.envs[
-                0
-            ]  # Get the first environment (we're only recording one)
-
-            env_vec.start_video_recorder()
-
-            # Run one episode to record
-            episode_done = False
-            episode_obs, _ = env_vec.reset()
-            while not episode_done:
-                episode_action = (
-                    envs.single_action_space.sample()
-                    if random.random() < 0.1
-                    else q_network.apply(q_state.params, episode_obs[None]).argmax(
-                        axis=-1
-                    )[0]
-                )
-                episode_obs, _, episode_term, episode_trunc, _ = env_vec.step(
-                    jax.device_get(episode_action)
-                )
-                episode_done = episode_term or episode_trunc
-            env_vec.reset()
-
-            # Stop recording and get the video path
-            video_path = env_vec.video_recorder.path
-
-            # Wait for the file to be fully written
-            time.sleep(0.3)
-
-            # Upload the video to wandb
-            if os.path.exists(video_path):
-                progress_bar.write(
-                    f"Uploaded video at {global_step/args.total_timesteps*100:.0f}% of training"
-                )
-            else:
-                progress_bar.write(
-                    f"Failed to save the video at {global_step/args.total_timesteps*100:.0f}% of training"
-                )
 
         # training process
         if global_step > args.learning_starts:

@@ -9,7 +9,7 @@ dependencies = [
     "flax",
     "jax[cuda12]", # nvidia support by default
     "optax",
-    "gymnasium[classic-control]",
+    "gymnasium[classic-control]<1",
     "numpy<2",# cuz stable baselines3 die otherwise
     "tyro",
     "stable-baselines3",
