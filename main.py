@@ -147,10 +147,6 @@ if __name__ == "__main__":
     )
 
     q_network.apply = jax.jit(q_network.apply)
-    # This step is not necessary as init called on same observation and key will always lead to same initializations
-    q_state = q_state.replace(
-        target_params=optax.incremental_update(q_state.params, q_state.target_params, 1)
-    )
 
     # this is the only dependency on stable baselines; i think we should find an alternative
     rb = sb3.common.buffers.ReplayBuffer(
