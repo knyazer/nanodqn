@@ -12,7 +12,6 @@ dependencies = [
     "gymnasium[classic-control]<1",
     "numpy<2",# cuz stable baselines3 die otherwise
     "tyro",
-    "stable-baselines3",
     "tqdm",
     "moviepy" # videos
 ]

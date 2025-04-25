@@ -15,6 +15,8 @@ import tyro
 from flax.training.train_state import TrainState
 from tqdm.auto import tqdm
 
+from replay_buffer import ReplayBuffer
+
 
 @dataclass
 class Args:
@@ -104,8 +106,6 @@ def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
 
 
 if __name__ == "__main__":
-    import stable_baselines3 as sb3
-
     args = tyro.cli(Args)
     assert args.num_envs == 1, "vectorized envs are not supported at the moment"
     run_name = f"{args.env_id}_{hex(int(time.time()) % 65536)}"
@@ -148,13 +148,11 @@ if __name__ == "__main__":
 
     q_network.apply = jax.jit(q_network.apply)
 
-    # this is the only dependency on stable baselines; i think we should find an alternative
-    rb = sb3.common.buffers.ReplayBuffer(
+    # Using our custom replay buffer
+    rb = ReplayBuffer(
         args.buffer_size,
         envs.single_observation_space,
         envs.single_action_space,
-        "cpu",
-        handle_timeout_termination=False,
     )
 
     @jax.jit
@@ -224,7 +222,7 @@ if __name__ == "__main__":
             current_mean = jnp.array(rs).mean()
             if last_mean_rs == 0:
                 last_mean_rs = current_mean
-            last_mean_rs = current_mean * 0.01 + 0.99 * last_mean_rs
+            last_mean_rs = current_mean * 0.05 + 0.95 * last_mean_rs
 
             if args.track:  # post updates into wandb
                 wandb.log(
@@ -255,11 +253,11 @@ if __name__ == "__main__":
                 # perform a gradient-descent step
                 loss, old_val, q_state = update(
                     q_state,
-                    data.observations.numpy(),
-                    data.actions.numpy(),
-                    data.next_observations.numpy(),
-                    data.rewards.flatten().numpy(),
-                    data.dones.flatten().numpy(),
+                    data.observations,
+                    data.actions,
+                    data.next_observations,
+                    data.rewards.flatten(),
+                    data.dones.flatten(),
                 )
 
                 if global_step % 1000 == 0:  # more reporting
