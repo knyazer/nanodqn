@@ -1,0 +1,15 @@
+# Learning rate sweep configuration
+
+defaults:
+  - /config # inherit from base config
+
+# Fixed parameters for this sweep
+env_id: CartPole-v1
+total_timesteps: 500000
+
+# Sweep parameters
+hydra:
+  sweeper:
+    params:
+      learning_rate: 1e-4,2.5e-4,5e-4,1e-3
+      batch_size: 64,128,256

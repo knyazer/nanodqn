@@ -1,0 +1,33 @@
+# Default configuration for nanodqn
+
+# General settings
+exp_name: nanodqn
+seed: 1
+track: true
+wandb_project_name: nanodqn
+capture_video: true
+save_model: false
+
+# Environment settings
+env_id: CartPole-v1
+num_envs: 1 # cleanRL has certain issues with multiple envs
+
+# Tunable settings (ala HPs)
+learning_rate: 2.5e-4
+batch_size: 128
+
+# Training settings
+total_timesteps: 500000
+buffer_size: 10000
+gamma: 0.99
+tau: 1.0
+target_network_frequency: 500
+start_e: 1.0
+end_e: 0.05
+exploration_fraction: 0.5
+learning_starts: 10000
+train_frequency: 10
+
+# Override these defaults by:
+# 1. Command line: python main.py env_id=MountainCar-v0 learning_rate=1e-3
+# 2. Config files: python main.py --config-name=mountain_car
