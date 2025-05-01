@@ -13,5 +13,7 @@ dependencies = [
     "numpy<2",# cuz stable baselines3 die otherwise
     "tyro",
     "tqdm",
-    "moviepy" # videos
+    "moviepy", # videos
+    "hydra-core>=1.3.0",
+    "omegaconf>=2.3.0"
 ]
