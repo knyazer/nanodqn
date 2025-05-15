@@ -14,7 +14,7 @@ num_envs: 1 # cleanRL has certain issues with multiple envs
 
 # Tunable settings (ala HPs)
 learning_rate: 2.5e-4
-batch_size: 128
+batch_size: 128 # batch size for the SGD
 
 # Training settings
 total_timesteps: 500000
