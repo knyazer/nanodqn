@@ -83,14 +83,10 @@ def update(q_network, q_state, data):
 
     def mse_loss(params):
         q_pred = q_network.apply(params, data.observations)  # (batch_size, num_actions)
-        q_pred = q_pred[
-            jnp.arange(args.batch_size), data.actions.squeeze()
-        ]  # (batch_size,)
+        q_pred = q_pred[jnp.arange(args.batch_size), data.actions.squeeze()]  # (batch_size,)
         return ((q_pred - next_q_value) ** 2).mean(), q_pred
 
-    (loss_value, q_pred), grads = jax.value_and_grad(mse_loss, has_aux=True)(
-        q_state.params
-    )
+    (loss_value, q_pred), grads = jax.value_and_grad(mse_loss, has_aux=True)(q_state.params)
     q_state = q_state.apply_gradients(grads=grads)
     return q_state, loss_value
 
@@ -98,6 +94,7 @@ def update(q_network, q_state, data):
 class DQN:
     def __init__(self, key, envs, obs):
         self.q_network = QNetwork(action_dim=envs.single_action_space.n)
+        breakpoint()
         self._last_mean_rs = 0
         self.q_network.apply = jax.jit(self.q_network.apply)
         self.q_state = TrainState.create(
@@ -107,11 +104,7 @@ class DQN:
             tx=optax.adamw(learning_rate=args.learning_rate),
         )
 
-        self.rb = ReplayBuffer(
-            buffer_size=args.buffer_size,
-            observation_space=envs.single_observation_space,
-            action_space=envs.single_action_space,
-        )
+        self.rb = None
 
     def step(self, global_step):
         if global_step % args.train_frequency == 0:
@@ -133,9 +126,7 @@ class DQN:
             global_step,
         )
         if random.random() < epsilon:
-            actions = jnp.array(
-                [envs.single_action_space.sample() for _ in range(envs.num_envs)]
-            )
+            actions = jnp.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
         else:
             q_values = self.q_network.apply(self.q_state.params, obs)
             actions = q_values.argmax(axis=-1)
@@ -200,9 +191,9 @@ def main(cfg: DictConfig) -> None:
             for i in range(args.num_envs)
         ]
     )
-    assert isinstance(
-        envs.single_action_space, gym.spaces.Discrete
-    ), "only discrete action space is supported"
+    assert isinstance(envs.single_action_space, gym.spaces.Discrete), (
+        "only discrete action space is supported"
+    )
     obs, _ = envs.reset(seed=args.seed)
 
     dqn = DQN(jr.key(args.seed + 1234), envs, obs)
@@ -211,6 +202,8 @@ def main(cfg: DictConfig) -> None:
         wandb.log({})  # commit to wandb
 
         actions = np.array(dqn.action(global_step, envs, obs))
+        print(actions)
+        breakpoint()
         next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
         real_next_obs = next_obs.copy()

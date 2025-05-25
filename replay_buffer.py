@@ -1,98 +1,76 @@
-import numpy as np
 from typing import Dict, NamedTuple, Any, Tuple
-from gymnasium import spaces
+import equinox as eqx
+import jax
+from jax import numpy as jnp
+from jax import random as jr
+from jaxtyping import Array, Bool, Float, Int
 
 
-class ReplayBufferSample(NamedTuple):
-    observations: np.ndarray
-    next_observations: np.ndarray
-    actions: np.ndarray
-    rewards: np.ndarray
-    dones: np.ndarray
+class ReplayBufferSample(eqx.Module):
+    observations: jnp.ndarray
+    next_observations: jnp.ndarray
+    actions: jnp.ndarray
+    rewards: jnp.ndarray
+    dones: jnp.ndarray
 
 
-class ReplayBuffer:
+class ReplayBuffer(eqx.Module):
+    buffer_size: int
+
+    observations: Float[Array, "bs obs_size"]
+    next_observations: Float[Array, "bs obs_size"]
+    actions: Float[Array, "bs act_size"] | Int[Array, "bs act_size"]
+    rewards: Float[Array, "bs 1"]
+    dones: Bool[Array, "bs 1"]
+
+    pos: Int[Array, ""]
+    full: Bool[Array, ""]
+
     def __init__(
         self,
         buffer_size: int,
-        observation_space: spaces.Space,
-        action_space: spaces.Space,
+        example_obs: Any,
+        example_act: Any,
     ):
         self.buffer_size = buffer_size
-        self.observation_space = observation_space
-        self.action_space = action_space
 
-        self.pos = 0
-        self.full = False
+        self.pos = jnp.zeros((), dtype=jnp.int32)  # noqa
+        self.full = jnp.zeros((), dtype=jnp.bool)  # noqa
 
-        obs_shape = self._get_shape(observation_space)
-        action_shape = self._get_shape(action_space)
-
-        self.observations = np.zeros(
-            (buffer_size, *obs_shape), dtype=observation_space.dtype
-        )
-        self.next_observations = np.zeros(
-            (buffer_size, *obs_shape), dtype=observation_space.dtype
-        )
-        self.actions = np.zeros((buffer_size, *action_shape), dtype=action_space.dtype)
-        self.rewards = np.zeros((buffer_size, 1), dtype=np.float32)
-        self.dones = np.zeros((buffer_size, 1), dtype=np.float32)
-
-    def _get_shape(self, space: spaces.Space) -> Tuple:
-        if isinstance(space, spaces.Box):
-            return space.shape
-        elif isinstance(space, spaces.Discrete):
-            return (1,)
-        elif isinstance(space, spaces.MultiDiscrete):
-            return (int(len(space.nvec)),)
-        elif isinstance(space, spaces.MultiBinary):
-            return (int(space.n),)
-        else:
-            raise NotImplementedError(f"Unsupported space type: {type(space)}")
+        self.observations = jnp.zeros((buffer_size, *example_obs.shape), example_obs.dtype)
+        self.next_observations = jnp.zeros((buffer_size, *example_obs.shape), example_obs.dtype)
+        self.actions = jnp.zeros((buffer_size, *example_act.shape), example_act.dtype)
+        self.rewards = jnp.zeros((buffer_size, 1), dtype=jnp.float32)
+        self.dones = jnp.zeros((buffer_size, 1), dtype=jnp.bool)
 
     def add(
         self,
-        obs: np.ndarray,
-        next_obs: np.ndarray,
-        action: np.ndarray,
-        reward: np.ndarray,
-        done: np.ndarray,
-        infos: Dict[str, Any],
-    ) -> None:
-        # Handle vectorized environment (multiple parallel environments)
-        for i in range(len(obs)):
-            self._add_single(obs[i], next_obs[i], action[i], reward[i], done[i])
-
-    def _add_single(
-        self,
-        obs: np.ndarray,
-        next_obs: np.ndarray,
-        action: np.ndarray,
-        reward: float,
-        done: bool,
-    ) -> None:
-        # Store transition in the buffer
-        self.observations[self.pos] = np.array(obs).copy()
-        self.next_observations[self.pos] = np.array(next_obs).copy()
-
-        if isinstance(self.action_space, spaces.Discrete):
-            self.actions[self.pos] = np.array([action]).copy()
-        else:
-            self.actions[self.pos] = np.array(action).copy()
-
-        self.rewards[self.pos] = np.array([reward]).copy()
-        self.dones[self.pos] = np.array([done]).copy()
+        obs: Float[Array, "obs_size"],
+        next_obs: Float[Array, "obs_size"],
+        action: Float[Array, "act_size"],
+        reward: Float[Array, ""],
+        done: Bool[Array, ""],
+    ):
+        self = eqx.tree_at(lambda s: s.observations, self, self.observations.at[self.pos].set(obs))
+        self = eqx.tree_at(
+            lambda s: s.next_observations, self, self.next_observations.at[self.pos].set(next_obs)
+        )
+        self = eqx.tree_at(lambda s: s.actions, self, self.actions.at[self.pos].set(action))
+        self = eqx.tree_at(lambda s: s.rewards, self, self.rewards.at[self.pos].set(reward))
+        self = eqx.tree_at(lambda s: s.dones, self, self.dones.at[self.pos].set(done))
 
         # Update buffer position
-        self.pos += 1
-        if self.pos >= self.buffer_size:
-            self.full = True
-            self.pos = 0
+        self = eqx.tree_at(lambda s: s.pos, self, self.pos + 1)
 
-    def sample(self, batch_size: int) -> ReplayBufferSample:
+        # Check if full
+        is_full = jnp.logical_or(self.full, (self.pos >= self.buffer_size))
+        self = eqx.tree_at(lambda s: s.full, self, is_full)
+        return self
+
+    def sample(self, key) -> ReplayBufferSample:
         # Calculate the indices to sample
-        upper_bound = self.buffer_size if self.full else self.pos
-        indices = np.random.randint(0, upper_bound, size=batch_size)
+        upper_bound = jax.lax.cond(self.full, lambda: self.buffer_size, lambda: self.pos)
+        indices = jr.randint(key, (), 0, upper_bound)
 
         return ReplayBufferSample(
             observations=self.observations[indices],
@@ -101,3 +79,6 @@ class ReplayBuffer:
             rewards=self.rewards[indices],
             dones=self.dones[indices],
         )
+
+    def filled(self):
+        return self.full
