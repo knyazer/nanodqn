@@ -98,7 +98,7 @@ class Bootstrapped(DQN):
 
 
 batch_size = 128
-num_envs = 1
+num_envs = 10
 
 if __name__ == "__main__":
     key = jr.key(0)
@@ -121,13 +121,13 @@ if __name__ == "__main__":
         target_model=Model(obs_size, act_size, key=target_model_key),
     )
 
-    optim = optax.adam(2e-4)
+    optim = optax.adamw(2e-4)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
 
     replay_buffer = ReplayBuffer(10_000, single_obs, action_space.sample(key))
 
     def train(model, opt_state, rb, key):
-        samples = eqx.filter_vmap(rb.sample)(jr.split(key, batch_size))
+        samples = rb.sample(key, batch_size)
         info, grads = eqx.filter_value_and_grad(lambda m: eqx.filter_vmap(m.loss)(samples).mean())(
             model
         )
@@ -175,12 +175,12 @@ if __name__ == "__main__":
             replay_buffer = replay_buffer.add(obs[i], n_obs[i], action[i], reward[i], done[i])
         obs = n_obs
 
-        return model, opt_state, (obs, state), replay_buffer, (done,)
+        return model, (obs, state), replay_buffer, (done,)
 
     # collect stuff for the replay buffer
     for i in tqdm(range(10_000 // num_envs)):
         key, subkey = jr.split(key)
-        model, opt_state, (obs, state), replay_buffer, info = step(
+        model, (obs, state), replay_buffer, info = step(
             model, (obs, state), replay_buffer, subkey, progress=0
         )
 
@@ -191,7 +191,7 @@ if __name__ == "__main__":
     for i in (pbar := tqdm(range(num_steps))):
         progress = jnp.clip(2 * i / num_steps, 0.0, 1.0)
         key, subkey, train_key = jr.split(key, 3)
-        model, opt_state, (obs, state), replay_buffer, info = step(
+        model, (obs, state), replay_buffer, info = step(
             model, (obs, state), replay_buffer, subkey, progress
         )
 
@@ -206,16 +206,16 @@ if __name__ == "__main__":
                 deltas.append(delta[j])
                 delta[j] = 0
 
-        if i % (500 // num_envs) == 0:
+        if i % (500 // num_envs) == (500 // num_envs - 1):
             model = eqx.tree_at(lambda m: m.target_model, model, model.model)
 
         if i % 50 == 0:
             rewards = np.array(deltas)
             timedisc = 0.95 ** (len(rewards) - np.arange(len(rewards)))
             reward = (rewards * timedisc).sum() / timedisc.sum()
-            pbar.set_description(f"Last train length-ish: {reward:.2f}")
+            pbar.set_description(f"At {progress:.2f} score: {reward:.2f}")
 
-        if i % (5000 // num_envs) == 0:
+        if i % (num_steps // 10) == 0:
             key, eval_key = jr.split(key)
             eval_rewards, state_seq = eqx.filter_vmap(lambda k: eval_run(model, k))(
                 jr.split(eval_key, 16)

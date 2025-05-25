@@ -67,10 +67,10 @@ class ReplayBuffer(eqx.Module):
         self = eqx.tree_at(lambda s: s.full, self, is_full)
         return self
 
-    def sample(self, key) -> ReplayBufferSample:
+    def sample(self, key, n) -> ReplayBufferSample:
         # Calculate the indices to sample
         upper_bound = jax.lax.cond(self.full, lambda: self.buffer_size, lambda: self.pos)
-        indices = jr.randint(key, (), 0, upper_bound)
+        indices = jr.randint(key, (n,), 0, upper_bound)
 
         return ReplayBufferSample(
             observations=self.observations[indices],
