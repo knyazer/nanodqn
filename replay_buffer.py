@@ -59,13 +59,11 @@ class ReplayBuffer(eqx.Module):
         self = eqx.tree_at(lambda s: s.rewards, self, self.rewards.at[self.pos].set(reward))
         self = eqx.tree_at(lambda s: s.dones, self, self.dones.at[self.pos].set(done))
 
-        # Update buffer position
-        self = eqx.tree_at(
-            lambda s: s.pos, self, jnp.min(jnp.array([self.pos + 1, self.buffer_size]))
-        )
+        # Update pointer position
+        self = eqx.tree_at(lambda s: s.pos, self, jnp.mod(self.pos + 1, self.buffer_size))
 
         # Check if full
-        is_full = jnp.logical_or(self.full, self.pos >= self.buffer_size)
+        is_full = jnp.logical_or(self.full, self.pos >= self.buffer_size - 1)
         self = eqx.tree_at(lambda s: s.full, self, is_full)
         return self
 

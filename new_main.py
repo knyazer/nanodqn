@@ -47,7 +47,7 @@ class Model(eqx.Module):
         return x
 
 
-gamma = 0.98
+gamma = 0.99
 
 
 class DQN(eqx.Module):
@@ -57,7 +57,7 @@ class DQN(eqx.Module):
 
     def loss(self, sample: ReplayBufferSample):
         assert len(sample.observations.shape) == 1
-        next_target_q_value = jnp.max(self.target_model(sample.next_observations), axis=-1)
+        next_target_q_value = jnp.max(self.target_model(sample.next_observations))
         next_q_value = jax.lax.stop_gradient(
             sample.rewards + (1 - sample.dones) * gamma * next_target_q_value
         )
@@ -98,36 +98,36 @@ class Bootstrapped(DQN):
 
 
 batch_size = 128
+num_envs = 1
 
 if __name__ == "__main__":
     key = jr.key(0)
     key, model_key, target_model_key, reset_key, loop_key = jr.split(key, 5)
 
     env, env_params = gymnax.make("CartPole-v1")
-    obs, state = env.reset(reset_key, env_params)
+    obs, state = jax.vmap(lambda k: env.reset(k, env_params))(jr.split(reset_key, num_envs))
     action_space = env.action_space(env_params)  # type: ignore
 
     assert "n" in action_space.__dict__, (
         "The environment is not discrete, or maybe incorrectly initialized"
     )
     act_size = action_space.__dict__.get("n", 2)
+    single_obs = obs[0]
+    obs_size = single_obs.size
 
     model = EpsilonGreedy(
         action_space=action_space,
-        model=Model(obs.size, act_size, key=model_key),
-        target_model=Model(obs.size, act_size, key=target_model_key),
+        model=Model(obs_size, act_size, key=model_key),
+        target_model=Model(obs_size, act_size, key=target_model_key),
     )
 
-    optim = optax.chain(
-        optax.adamw(3e-4),
-    )
+    optim = optax.adam(2e-4)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
 
-    replay_buffer = ReplayBuffer(10_000, obs, action_space.sample(key))
+    replay_buffer = ReplayBuffer(10_000, single_obs, action_space.sample(key))
 
     def train(model, opt_state, rb, key):
         samples = eqx.filter_vmap(rb.sample)(jr.split(key, batch_size))
-        jax.debug.print("{}", samples.observations)
         info, grads = eqx.filter_value_and_grad(lambda m: eqx.filter_vmap(m.loss)(samples).mean())(
             model
         )
@@ -157,46 +157,56 @@ if __name__ == "__main__":
         return episode_return, state_arr
 
     @eqx.filter_jit
-    def step(model, opt_state, obs_state, replay_buffer, key, progress, *, only_data=False):
+    def step(model, obs_state, replay_buffer, key, progress):
         obs, state = obs_state
-        act_key, step_key, train_key, key = jr.split(key, 4)
+        step_key, key = jr.split(key)
 
         eps = jnp.clip(1 - progress, 0.05, 1.0)
-        action = model.action(obs, act_key, eps)
-        n_obs, state, reward, done, _ = env.step(step_key, state, action, env_params)
-        replay_buffer = replay_buffer.add(obs, n_obs, action, reward, done)
+
+        def unbatched_step(key, state, obs):
+            act_key, step_key = jr.split(key)
+            action = model.action(obs, act_key, eps)
+            return *env.step(step_key, state, action, env_params), action
+
+        n_obs, state, reward, done, _, action = eqx.filter_vmap(unbatched_step)(
+            jr.split(step_key, num_envs), state, obs
+        )
+        for i in range(len(n_obs)):
+            replay_buffer = replay_buffer.add(obs[i], n_obs[i], action[i], reward[i], done[i])
         obs = n_obs
 
-        info = []
-        if not only_data:
-            model, opt_state, train_info = train(model, opt_state, replay_buffer, train_key)
-            info += [train_info]
-
-        return model, opt_state, (obs, state), replay_buffer, (done, info)
+        return model, opt_state, (obs, state), replay_buffer, (done,)
 
     # collect stuff for the replay buffer
-    for i in tqdm(range(10_000)):
+    for i in tqdm(range(10_000 // num_envs)):
         key, subkey = jr.split(key)
         model, opt_state, (obs, state), replay_buffer, info = step(
-            model, opt_state, (obs, state), replay_buffer, subkey, jnp.array(0.0), only_data=True
+            model, (obs, state), replay_buffer, subkey, progress=0
         )
 
     # the actual training
     deltas = []
-    delta = 0
-    for i in (pbar := tqdm(range(200_000))):
-        progress = jnp.clip(i / 100_000, 0.0, 1.0)
-        key, subkey = jr.split(key)
+    delta = np.zeros((num_envs,), dtype=np.int32)
+    num_steps = 200_000 // num_envs
+    for i in (pbar := tqdm(range(num_steps))):
+        progress = jnp.clip(2 * i / num_steps, 0.0, 1.0)
+        key, subkey, train_key = jr.split(key, 3)
         model, opt_state, (obs, state), replay_buffer, info = step(
-            model, opt_state, (obs, state), replay_buffer, subkey, progress, only_data=(i % 10 != 0)
+            model, (obs, state), replay_buffer, subkey, progress
         )
 
-        delta += 1
-        if info[0]:
-            deltas.append(delta)
-            delta = 0
+        if i % (10 // num_envs) == 0:
+            model, opt_state, train_info = eqx.filter_jit(train)(
+                model, opt_state, replay_buffer, train_key
+            )
 
-        if i % 500 == 499:
+        delta += 1
+        for j in range(len(info)):
+            if info[j][0]:
+                deltas.append(delta[j])
+                delta[j] = 0
+
+        if i % (500 // num_envs) == 0:
             model = eqx.tree_at(lambda m: m.target_model, model, model.model)
 
         if i % 50 == 0:
@@ -205,7 +215,7 @@ if __name__ == "__main__":
             reward = (rewards * timedisc).sum() / timedisc.sum()
             pbar.set_description(f"Last train length-ish: {reward:.2f}")
 
-        if i % 5000 == 0:
+        if i % (5000 // num_envs) == 0:
             key, eval_key = jr.split(key)
             eval_rewards, state_seq = eqx.filter_vmap(lambda k: eval_run(model, k))(
                 jr.split(eval_key, 16)
