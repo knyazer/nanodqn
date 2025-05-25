@@ -149,12 +149,12 @@ if __name__ == "__main__":
                 obs2, state2, reward, done2, _ = env.step(step_key, state, action, env_params)
                 return (key, obs2, state2, done2, ret + reward)
 
-            return jax.lax.cond(done, lambda: (key, obs, state, done, ret), env_step), state
+            return jax.lax.cond(done, lambda: (key, obs, state, done, ret), env_step), None
 
-        final_carry, state_arr = jax.lax.scan(_step, init_carry, xs=None, length=500)
+        final_carry, _ = jax.lax.scan(_step, init_carry, xs=None, length=500)
         _, _, _, _, episode_return = final_carry
 
-        return episode_return, state_arr
+        return episode_return
 
     @eqx.filter_jit
     def step(model, obs_state, replay_buffer, key, progress):
@@ -184,10 +184,10 @@ if __name__ == "__main__":
             model, (obs, state), replay_buffer, subkey, progress=0
         )
 
-    # the actual training
     deltas = []
     delta = np.zeros((num_envs,), dtype=np.int32)
-    num_steps = 200_000 // num_envs
+    num_steps = 500_000 // num_envs
+
     for i in (pbar := tqdm(range(num_steps))):
         progress = jnp.clip(2 * i / num_steps, 0.0, 1.0)
         key, subkey, train_key = jr.split(key, 3)
@@ -195,10 +195,9 @@ if __name__ == "__main__":
             model, (obs, state), replay_buffer, subkey, progress
         )
 
-        if i % (10 // num_envs) == 0:
-            model, opt_state, train_info = eqx.filter_jit(train)(
-                model, opt_state, replay_buffer, train_key
-            )
+        model, opt_state, train_info = eqx.filter_jit(train)(
+            model, opt_state, replay_buffer, train_key
+        )
 
         delta += 1
         for j in range(len(info)):
@@ -209,15 +208,13 @@ if __name__ == "__main__":
         if i % (500 // num_envs) == (500 // num_envs - 1):
             model = eqx.tree_at(lambda m: m.target_model, model, model.model)
 
-        if i % 50 == 0:
-            rewards = np.array(deltas)
-            timedisc = 0.95 ** (len(rewards) - np.arange(len(rewards)))
-            reward = (rewards * timedisc).sum() / timedisc.sum()
+        if i % 50 == 49:
+            reward = np.array(deltas[-3:]).mean()
             pbar.set_description(f"At {progress:.2f} score: {reward:.2f}")
 
-        if i % (num_steps // 10) == 0:
+        if i % (num_steps // 20) == 0:
             key, eval_key = jr.split(key)
-            eval_rewards, state_seq = eqx.filter_vmap(lambda k: eval_run(model, k))(
-                jr.split(eval_key, 16)
+            eval_rewards = eqx.filter_vmap(lambda k: eval_run(model, k))(
+                jr.split(eval_key, batch_size * 8)
             )
             print(f"{eval_rewards.mean():.2f}+-{eval_rewards.std():.2f}")

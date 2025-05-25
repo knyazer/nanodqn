@@ -262,7 +262,7 @@ def main():
         "GAMMA": 0.99,
         "TAU": 1.0,
         "ENV_NAME": "CartPole-v1",
-        "SEED": 0,
+        "SEED": 1,
         "NUM_SEEDS": 1,
         "WANDB_MODE": "online",  # set to online to activate wandb
         "ENTITY": "",
