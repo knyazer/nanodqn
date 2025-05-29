@@ -7,7 +7,6 @@ from jax import numpy as jnp
 import jax
 from jaxtyping import PRNGKeyArray, Float, Array
 import gymnax
-from gymnax.visualize import Visualizer
 from replay_buffer import ReplayBuffer, ReplayBufferSample
 from tqdm import tqdm as tqdm
 import optax
