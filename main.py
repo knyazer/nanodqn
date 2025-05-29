@@ -11,6 +11,17 @@ from replay_buffer import ReplayBuffer, ReplayBufferSample
 from tqdm import tqdm as tqdm
 import optax
 import wandb
+import os
+
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
+
+jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
+jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
+
+
+DOUBLE_DQN = False
 
 T = TypeVar("T")
 
@@ -31,7 +42,7 @@ class Model(eqx.Module):
         layer_sizes=None,
     ):
         if layer_sizes is None:
-            layer_sizes = [120, 84]
+            layer_sizes = [24, 24]
         layer_sizes = [observation_size, *layer_sizes, action_size]
 
         layers = []
@@ -41,7 +52,8 @@ class Model(eqx.Module):
 
         self.layers = layers
 
-    def __call__(self, x: Float[Array, "obs_size"]) -> Float[Array, "act_size"]:  # noqa
+    def __call__(self, x: Float[Array, "*"]) -> Float[Array, "act_size"]:  # noqa
+        x = x.ravel()  # flatten
         for layer in self.layers[:-1]:
             x = jax.nn.gelu(layer(x))
         x = self.layers[-1](x)
@@ -70,22 +82,38 @@ class DQN(eqx.Module):
     target_model: Model
     replay_buffer: ReplayBuffer
 
-    def __init__(self, /, model_factory, action_space, key: PRNGKeyArray, *_):
+    def __init__(self, /, model_factory, action_space, rb, key: PRNGKeyArray):
         mkey, tkey = jr.split(key, 2)
         self.model = model_factory(mkey)
         self.target_model = model_factory(tkey)
         self.action_space = action_space
+        self.replay_buffer = rb
 
-    def loss(self, sample: ReplayBufferSample, key: PRNGKeyArray):
-        assert len(sample.observations.shape) == 1
-        next_target_q_value = jnp.max(self.target_model(sample.next_observations))
+    def loss(self, key: PRNGKeyArray):
+        rkey, key = jr.split(key)
+
+        sample = self.replay_buffer.sample(rkey, 1)
+        target_model = self.target_model
+        model = self.model
+
+        # compute the 'target' q value (next step)
+        if DOUBLE_DQN:  # double dqn
+            best_action = model(sample.next_observations.squeeze()).argmax()
+            next_target_q_value = (target_model(sample.next_observations.squeeze()))[best_action]
+        else:
+            next_target_q_value = jnp.max(target_model(sample.next_observations.squeeze()))
+
         next_q_value = jax.lax.stop_gradient(
             sample.rewards + (1 - sample.dones) * gamma * next_target_q_value
-        )
+        ).squeeze()
 
-        q_pred = self.model(sample.observations)
+        # compute our model's prediction of the next value
+        q_pred = model(sample.observations.squeeze())
         q_pred = q_pred[sample.actions]
-        return ((q_pred - next_q_value) ** 2).mean()
+        return ((q_pred - next_q_value) ** 2).mean(), (q_pred, next_q_value)
+
+    def add_to_buffer(self, *data):
+        return eqx.tree_at(lambda s: s.replay_buffer, self, self.replay_buffer.add(*data))
 
     def sync_target(self):
         self = eqx.tree_at(lambda m: m.target_model, self, self.model)
@@ -93,7 +121,7 @@ class DQN(eqx.Module):
 
 
 class EpsilonGreedy(DQN):
-    def action(self, observation: Any, key: PRNGKeyArray, epsilon: Float[Array, ""]):
+    def action(self, observation: Any, key: PRNGKeyArray, epsilon: Float[Array, ""], **kw):
         choice_key, act_key = jr.split(key)
         return jax.lax.cond(
             jr.uniform(choice_key, ()) < epsilon,
@@ -109,7 +137,7 @@ class Bootstrapped(DQN):
     target_model: Model  # this too, each target is node-wise
     replay_buffer: ReplayBuffer
 
-    def __init__(self, /, model_factory, ensemble_size, action_space, rb, key: PRNGKeyArray, *_):
+    def __init__(self, /, model_factory, ensemble_size, action_space, rb, key: PRNGKeyArray):
         tkey, mkey = jr.split(key)
         keys = jr.split(mkey, ensemble_size)
         models = [model_factory(mkey) for mkey in keys]
@@ -152,7 +180,7 @@ class Bootstrapped(DQN):
         model = self.model
 
         # compute the 'target' q value (next step)
-        if False:  # double dqn
+        if DOUBLE_DQN:  # double dqn
             best_action = model(sample.next_observations.squeeze()).argmax()
             next_target_q_value = (target_model(sample.next_observations.squeeze()))[best_action]
         else:
@@ -175,16 +203,18 @@ class Bootstrapped(DQN):
         return single_model(observation).argmax()
 
 
-batch_size = 256
+batch_size = 64
+lr = 1e-4
 num_envs = 10
 ensemble_size = 4
-env_name = ["CartPole-v1", "MountainCar-v0"][0]
+env_name = "DeepSea-bsuite"
 
-if __name__ == "__main__":
-    key = jr.key(1)
+
+def main(seed=0):
+    key = jr.key(seed)
     key, model_key, target_model_key, reset_key, loop_key, ikey = jr.split(key, 6)
 
-    env, env_params = gymnax.make(env_name)
+    env, env_params = gymnax.make(env_name, size=32)
     obs, state = jax.vmap(lambda k: env.reset(k, env_params))(jr.split(reset_key, num_envs))
     action_space = env.action_space(env_params)  # type: ignore
 
@@ -203,9 +233,19 @@ if __name__ == "__main__":
         key=model_key,
     )
 
-    optim = optax.adamw(2e-4)
+    """
+    model = EpsilonGreedy(
+        action_space=action_space,
+        model_factory=lambda k: Model(obs_size, act_size, key=k),
+        rb=ReplayBuffer(10_000, single_obs, action_space.sample(key)),
+        key=model_key,
+    )
+    """
+
+    optim = optax.adamw(lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
 
+    @eqx.filter_jit
     def train(model, opt_state, key):
         key, fkey = jr.split(key)
 
@@ -219,6 +259,7 @@ if __name__ == "__main__":
         model = eqx.apply_updates(model, updates)
         return model, opt_state, (*info, loss)
 
+    @eqx.filter_jit
     def eval_run(model, key):
         key, reset_key, ikey = jr.split(key, 3)
         obs, state = env.reset(reset_key, env_params)
@@ -259,70 +300,116 @@ if __name__ == "__main__":
         # Note that the following does not follow the RP nor BS paper, but
         # instead is more intuitive: we add the transitions only to our "own"
         # buffers
-        for _ in range(2):
-            random_indices = jr.randint(key, model_indices.shape, 0, ensemble_size)
-            for i, model_index in zip(range(len(n_obs)), random_indices):
-                model = model.add_to_buffer(
-                    model_index, (obs[i], n_obs[i], action[i], reward[i], done[i])
-                )
+        if isinstance(model, Bootstrapped):
+            for _ in range(2):
+                random_indices = jr.randint(key, model_indices.shape, 0, ensemble_size)
+                for i, model_index in zip(range(len(n_obs)), random_indices):
+                    model = model.add_to_buffer(
+                        model_index, (obs[i], n_obs[i], action[i], reward[i], done[i])
+                    )
+        else:
+            for i in range(len(n_obs)):
+                model = model.add_to_buffer(obs[i], n_obs[i], action[i], reward[i], done[i])
 
         obs = n_obs
 
         return model, (obs, state), (done, reward)
 
+    jax.debug.print("Starting to fill the replay buffer...")
+
     # collect stuff for the replay buffer
-    for i in tqdm(range(10_000 // num_envs)):
+    for i in range(10_000 // num_envs):
         key, subkey = jr.split(key)
         for ind in range(ensemble_size):
             model, (obs, state), info = step(
                 model, (obs, state), subkey, progress=0, model_indices=jnp.array([ind] * num_envs)
             )
 
-    full_rewards = []
+    jax.debug.print("Filled out the replay buffer. Starting training.")
+
+    def init_wandb():
+        wandb.init(name=f"{type(model).__name__}-{env_name}//({ensemble_size})")
+        wandb.run.log_code(".")  # type: ignore
+
+    jax.debug.callback(init_wandb)
+
+    @eqx.filter_jit
+    def inner_loop(model, obs, state, model_indices, opt_state, key, rews, i):
+        progress = jnp.clip(i / num_steps, 0.0, 1.0)
+        key, subkey, train_key = jr.split(key, 3)
+        d_key = jr.split(subkey, num_envs)
+        model, (obs, state), (dones, c_rewards) = step(
+            model, (obs, state), subkey, progress, model_indices
+        )
+
+        model, opt_state, train_info = train(model, opt_state, train_key)
+        rews += c_rewards
+
+        _log = {
+            "qval": train_info[0].mean(),
+            "qtarget": train_info[1].mean(),
+            "tdloss": train_info[2].mean(),
+            "train_reward": jax.lax.cond(
+                jnp.count_nonzero(dones) == 0, lambda: jnp.nan, lambda: (rews * dones).mean()
+            ),
+        }
+
+        def episode_done(rews, model_indices, j):
+            model_indices = model_indices.at[j].set(jr.randint(d_key[j], (), 0, ensemble_size))
+            rews = rews.at[j].set(0)
+            return rews, model_indices
+
+        for j in range(len(dones)):
+            rews, model_indices = jax.lax.cond(
+                dones[j],
+                lambda: episode_done(rews, model_indices, j),
+                lambda: (rews, model_indices),
+            )
+
+        model = eqx.tree_at(
+            lambda _m: _m.target_model,
+            model,
+            jax.lax.cond(
+                i % (500 // num_envs) == (500 // num_envs - 1),
+                lambda: model.model,
+                lambda: model.target_model,
+            ),
+        )
+
+        """
+        def fast_eval(model, key):
+            key, eval_key = jr.split(key)
+            eval_rewards = eqx.filter_vmap(lambda k: eval_run(model, k))(
+                jr.split(eval_key, batch_size * 8)
+            )
+            _log({"eval_reward": eval_rewards.mean()})
+            jax.debug.print("Eval reward: {}", eval_rewards.mean())
+            return key
+
+        key = jax.lax.cond(
+            i % (num_steps // 20) == (num_steps // 20) - 1,
+            lambda: fast_eval(model, key),
+            lambda: key,
+        )
+        """
+
+        return model, obs, state, model_indices, opt_state, key, rews, _log
+
     rews = np.zeros((num_envs,), dtype=np.int32)
     num_steps = 500_000 // num_envs
 
     model_indices = jr.randint(ikey, (num_envs,), 0, ensemble_size)
 
-    wandb.init(name=f"{type(model).__name__}-{env_name}//({ensemble_size})")
-    wandb.run.log_code(".")  # type: ignore
-    for i in (pbar := tqdm(range(num_steps))):
-        progress = jnp.clip(i / num_steps, 0.0, 1.0)
-        key, subkey, train_key = jr.split(key, 3)
-        model, (obs, state), (dones, c_rewards) = step(
-            model, (obs, state), subkey, progress, model_indices
+    for i in range(num_steps):
+        model, obs, state, model_indices, opt_state, key, rews, _log = inner_loop(
+            model, obs, state, model_indices, opt_state, key, rews, jnp.array(i)
         )
+        if _log["train_reward"] == jnp.nan:
+            del _log["train_reward"]
+        wandb.log({**_log})
 
-        model, opt_state, train_info = eqx.filter_jit(train)(model, opt_state, train_key)
-        wandb.log(
-            {
-                "qval": train_info[0].mean(),
-                "qtarget": train_info[1].mean(),
-                "tdloss": train_info[2].mean(),
-            },
-            commit=False,
-        )
+    return model
 
-        rews += c_rewards
-        for j in range(len(dones)):
-            if dones[j]:
-                full_rewards.append(rews[j])
-                wandb.log({"train_reward": rews[j]}, commit=False)
-                model_indices = model_indices.at[j].set(jr.randint(key, (), 0, ensemble_size))
-                rews = rews.at[j].set(0)
 
-        if i % (500 // num_envs) == (500 // num_envs - 1):
-            model = eqx.tree_at(lambda m: m.target_model, model, model.model)
-
-        if i % 50 == 49:
-            reward = np.array(full_rewards[-3:]).mean()
-            pbar.set_description(f"At {progress:.2f} score: {reward:.2f}")
-
-        if i % (num_steps // 20) == (num_steps // 20) - 1:
-            key, eval_key = jr.split(key)
-            eval_rewards = eqx.filter_vmap(lambda k: eval_run(model, k))(
-                jr.split(eval_key, batch_size * 8)
-            )
-            wandb.log({"eval_reward": eval_rewards.mean()}, commit=False)
-            print(f"{eval_rewards.mean():.2f}+-{eval_rewards.std() / jnp.sqrt(batch_size * 8):.2f}")
-        wandb.log({}, commit=True)
+if __name__ == "__main__":
+    main()
