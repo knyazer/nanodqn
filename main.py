@@ -1,228 +1,329 @@
-import os
-import random
-import time
-from dataclasses import dataclass, make_dataclass, field
-from typing import Any
-
-import flax
-import flax.linen as nn
-import gymnasium as gym
-import hydra
-import jax
-import jax.numpy as jnp
-import jax.random as jr
+from os import wait
+import equinox as eqx
 import numpy as np
+from typing import List, Protocol, TypeVar, Any
+from jax import random as jr
+from jax import numpy as jnp
+import jax
+from jaxtyping import PRNGKeyArray, Float, Array
+import gymnax
+from gymnax.visualize import Visualizer
+from replay_buffer import ReplayBuffer, ReplayBufferSample
+from tqdm import tqdm as tqdm
 import optax
-from flax.training.train_state import TrainState
-from omegaconf import DictConfig, OmegaConf
-from tqdm.auto import tqdm
+import wandb
 
-from replay_buffer import ReplayBuffer
-
-args = None  # placeholder
+T = TypeVar("T")
 
 
-def make_env(env_id, seed, idx, capture_video, run_name):
-    def thunk():
-        if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(
-                env,
-                f"videos/{run_name}",
-                step_trigger=lambda s: s % 50000 == 49999,  # every 50k steps
-            )
-        else:
-            env = gym.make(env_id)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env.action_space.seed(seed)
-
-        return env
-
-    return thunk
+class ModuleT(Protocol[T]):
+    def __call__(self, *args: Any, **kwargs: Any) -> T: ...
 
 
-class QNetwork(nn.Module):
-    action_dim: int
+class Model(eqx.Module):
+    layers: List[ModuleT]
 
-    @nn.compact
-    def __call__(self, x: jnp.ndarray):
-        x = nn.Dense(120)(x)
-        x = nn.relu(x)
-        x = nn.Dense(84)(x)
-        x = nn.relu(x)
-        x = nn.Dense(self.action_dim)(x)
+    def __init__(
+        self,
+        observation_size: int,
+        action_size: int,
+        /,
+        key: PRNGKeyArray,
+        layer_sizes=None,
+    ):
+        if layer_sizes is None:
+            layer_sizes = [120, 84]
+        layer_sizes = [observation_size, *layer_sizes, action_size]
+
+        layers = []
+        for inpsize, outsize in zip(layer_sizes[:-1], layer_sizes[1:]):
+            subkey, key = jr.split(key)
+            layers.append(eqx.nn.Linear(inpsize, outsize, key=subkey))
+
+        self.layers = layers
+
+    def __call__(self, x: Float[Array, "obs_size"]) -> Float[Array, "act_size"]:  # noqa
+        for layer in self.layers[:-1]:
+            x = jax.nn.gelu(layer(x))
+        x = self.layers[-1](x)
         return x
 
 
-class TrainState(TrainState):
-    target_params: flax.core.FrozenDict
+class ModelWithPrior(Model):
+    prior: Model
+
+    def __init__(self, observation_size, action_size, /, key, layer_sizes=None):
+        k1, k2 = jr.split(key)
+        super().__init__(observation_size, action_size, key=k1, layer_sizes=layer_sizes)
+
+        self.prior = Model(observation_size, action_size, key=k2, layer_sizes=layer_sizes)
+
+    def __call__(self, x):
+        return super().__call__(x) + jax.lax.stop_gradient(self.prior(x))
 
 
-def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
-    slope = (end_e - start_e) / duration
-    return max(slope * t + start_e, end_e)
+gamma = 0.99
 
 
-def create_config_dataclass(cfg: DictConfig) -> Any:
-    fields = []
-    for key, value in cfg.items():
-        field_type = type(value)
-        if value is None:
-            field_type = Any
-        fields.append((key, field_type, field(default=value)))
+class DQN(eqx.Module):
+    action_space: Any
+    model: Model
+    target_model: Model
+    replay_buffer: ReplayBuffer
 
-    return make_dataclass("Config", fields)()
+    def __init__(self, /, model_factory, action_space, key: PRNGKeyArray, *_):
+        mkey, tkey = jr.split(key, 2)
+        self.model = model_factory(mkey)
+        self.target_model = model_factory(tkey)
+        self.action_space = action_space
 
-
-def update(q_network, q_state, data):
-    q_next_target = q_network.apply(
-        q_state.target_params, data.next_observations
-    )  # (batch_size, num_actions)
-    q_next_target = jnp.max(q_next_target, axis=-1)  # (batch_size,)
-    next_q_value = data.rewards + (1 - data.dones) * args.gamma * q_next_target
-
-    def mse_loss(params):
-        q_pred = q_network.apply(params, data.observations)  # (batch_size, num_actions)
-        q_pred = q_pred[jnp.arange(args.batch_size), data.actions.squeeze()]  # (batch_size,)
-        return ((q_pred - next_q_value) ** 2).mean(), q_pred
-
-    (loss_value, q_pred), grads = jax.value_and_grad(mse_loss, has_aux=True)(q_state.params)
-    q_state = q_state.apply_gradients(grads=grads)
-    return q_state, loss_value
-
-
-class DQN:
-    def __init__(self, key, envs, obs):
-        self.q_network = QNetwork(action_dim=envs.single_action_space.n)
-        breakpoint()
-        self._last_mean_rs = 0
-        self.q_network.apply = jax.jit(self.q_network.apply)
-        self.q_state = TrainState.create(
-            apply_fn=self.q_network.apply,
-            params=self.q_network.init(key, obs),
-            target_params=self.q_network.init(key, obs),
-            tx=optax.adamw(learning_rate=args.learning_rate),
+    def loss(self, sample: ReplayBufferSample, key: PRNGKeyArray):
+        assert len(sample.observations.shape) == 1
+        next_target_q_value = jnp.max(self.target_model(sample.next_observations))
+        next_q_value = jax.lax.stop_gradient(
+            sample.rewards + (1 - sample.dones) * gamma * next_target_q_value
         )
 
-        self.rb = None
+        q_pred = self.model(sample.observations)
+        q_pred = q_pred[sample.actions]
+        return ((q_pred - next_q_value) ** 2).mean()
 
-    def step(self, global_step):
-        if global_step % args.train_frequency == 0:
-            data = self.rb.sample(args.batch_size)
-            self.q_state, loss = update(self.q_network, self.q_state, data)
+    def sync_target(self):
+        self = eqx.tree_at(lambda m: m.target_model, self, self.model)
+        return self
 
-        if global_step % args.target_network_frequency == 0:
-            self.q_state = self.q_state.replace(
-                target_params=optax.incremental_update(
-                    self.q_state.params, self.q_state.target_params, args.tau
-                )
-            )
 
-    def action(self, global_step, envs, obs):
-        epsilon = linear_schedule(
-            args.start_e,
-            args.end_e,
-            args.exploration_fraction * args.total_timesteps,
-            global_step,
+class EpsilonGreedy(DQN):
+    def action(self, observation: Any, key: PRNGKeyArray, epsilon: Float[Array, ""]):
+        choice_key, act_key = jr.split(key)
+        return jax.lax.cond(
+            jr.uniform(choice_key, ()) < epsilon,
+            lambda: jax.lax.stop_gradient(self.action_space.sample(act_key)),
+            lambda: self.model(observation).argmax(),
         )
-        if random.random() < epsilon:
-            actions = jnp.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
+
+
+class Bootstrapped(DQN):
+    action_space: Any
+    ensemble_size: int
+    model: Model  # this model is stacked node-wise
+    target_model: Model  # this too, each target is node-wise
+    replay_buffer: ReplayBuffer
+
+    def __init__(self, /, model_factory, ensemble_size, action_space, rb, key: PRNGKeyArray, *_):
+        tkey, mkey = jr.split(key)
+        keys = jr.split(mkey, ensemble_size)
+        models = [model_factory(mkey) for mkey in keys]
+
+        keys = jr.split(tkey, ensemble_size)
+        tmodels = [model_factory(tkey) for tkey in keys]
+
+        self.model = jax.tree.map(lambda *nodes: jnp.stack(nodes), *models, is_leaf=eqx.is_array)
+        self.target_model = jax.tree.map(
+            lambda *nodes: jnp.stack(nodes), *tmodels, is_leaf=eqx.is_array
+        )
+        self.ensemble_size = ensemble_size
+        self.action_space = action_space
+        self.replay_buffer = jax.tree.map(
+            lambda *nodes: jnp.stack(nodes), *([rb] * ensemble_size), is_leaf=eqx.is_array
+        )
+
+    def __getitem__(self, idx):
+        return jax.tree.map(lambda node: node[idx] if eqx.is_array(node) else node, self)
+
+    def __len__(self):
+        return self.ensemble_size
+
+    def add_to_buffer(self, index, data):
+        new_rb = self[index].replay_buffer.add(*data)
+        new_stacked_rb = jax.tree.map(
+            lambda node, newnode: node.at[index].set(newnode), self.replay_buffer, new_rb
+        )
+        return eqx.tree_at(lambda s: s.replay_buffer, self, new_stacked_rb)
+
+    def loss(self, key: PRNGKeyArray):
+        rkey, subkey, key = jr.split(key, 3)
+
+        # sample data from the buffer
+        model_index = jr.randint(subkey, (), 0, self.ensemble_size)
+        self = self[model_index]
+
+        sample = self.replay_buffer.sample(rkey, 1)
+        target_model = self.target_model
+        model = self.model
+
+        # compute the 'target' q value (next step)
+        if False:  # double dqn
+            best_action = model(sample.next_observations.squeeze()).argmax()
+            next_target_q_value = (target_model(sample.next_observations.squeeze()))[best_action]
         else:
-            q_values = self.q_network.apply(self.q_state.params, obs)
-            actions = q_values.argmax(axis=-1)
-        return actions
+            next_target_q_value = jnp.max(target_model(sample.next_observations.squeeze()))
 
-    def report(self, global_step, infos, *, wandb=None, tqdm_bar=None):
-        rs, ls = [], []
-        if "final_info" in infos:
-            for info in infos["final_info"]:
-                if info and "episode" in info:
-                    rs.append(info["episode"]["r"])
-                    ls.append(info["episode"]["l"])
+        next_q_value = jax.lax.stop_gradient(
+            sample.rewards + (1 - sample.dones) * gamma * next_target_q_value
+        ).squeeze()
 
-            current_mean = jnp.array(rs).mean()
-            if self._last_mean_rs == 0:
-                self._last_mean_rs = current_mean
-            self._last_mean_rs = current_mean * 0.05 + 0.95 * self._last_mean_rs
+        # compute our model's prediction of the next value
+        q_pred = model(sample.observations.squeeze())
+        q_pred = q_pred[sample.actions]
+        return ((q_pred - next_q_value) ** 2).mean(), (q_pred, next_q_value)
 
-            if args.track:  # post updates into wandb
-                if wandb is None:
-                    raise ValueError(
-                        "Trying to track, while haven't passed wandb= kwarg to report!"
-                    )
-                wandb.log(
-                    {
-                        "charts/episodic_return": jnp.array(rs).mean(),
-                        "charts/episodic_length": jnp.array(ls).mean(),
-                    },
-                    commit=False,
-                )
-
-        if global_step % 200 == 0 and tqdm_bar is not None:
-            tqdm_bar.set_description_str(f"Reward: {float(self._last_mean_rs):.2f}")
-
-
-@hydra.main(version_base=None, config_path="configs", config_name="config")
-def main(cfg: DictConfig) -> None:
-    # Convert Hydra config to dynamically created dataclass
-    global args
-    args = create_config_dataclass(cfg)
-
-    run_name = f"{args.env_id}_{hex(int(time.time()) % 65536)}"
-    if args.track:
-        import wandb
-
-        # Store full config in wandb for reproducibility
-        wandb.init(
-            project=args.wandb_project_name,
-            config=OmegaConf.to_container(cfg, resolve=True),
-            name=run_name,
-            monitor_gym=True,
-            save_code=True,
+    def action(self, observation: Float[Array, "obs_size"], *_, index=None, **kws):
+        assert index is not None
+        single_model = jax.tree.map(
+            lambda node: node[index] if eqx.is_array(node) else node, self.model
         )
+        return single_model(observation).argmax()
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    key, q_key = jr.split(jr.key(args.seed))
 
-    envs = gym.vector.SyncVectorEnv(
-        [
-            make_env(args.env_id, args.seed + i, i, args.capture_video, run_name)
-            for i in range(args.num_envs)
-        ]
-    )
-    assert isinstance(envs.single_action_space, gym.spaces.Discrete), (
-        "only discrete action space is supported"
-    )
-    obs, _ = envs.reset(seed=args.seed)
-
-    dqn = DQN(jr.key(args.seed + 1234), envs, obs)
-
-    for global_step in (progress_bar := tqdm(range(args.total_timesteps))):
-        wandb.log({})  # commit to wandb
-
-        actions = np.array(dqn.action(global_step, envs, obs))
-        print(actions)
-        breakpoint()
-        next_obs, rewards, terminations, truncations, infos = envs.step(actions)
-
-        real_next_obs = next_obs.copy()
-        for idx, trunc in enumerate(truncations):
-            if trunc:
-                real_next_obs[idx] = infos["final_observation"][idx]
-        dqn.rb.add(obs, real_next_obs, actions, rewards, terminations, infos)
-
-        dqn.report(global_step, infos, wandb=wandb, tqdm_bar=progress_bar)
-
-        obs = next_obs
-        if global_step > args.learning_starts:
-            dqn.step(global_step)
-
-    if args.save_model:
-        raise NotImplementedError()
-
-    envs.close()
-
+batch_size = 256
+num_envs = 10
+ensemble_size = 4
+env_name = ["CartPole-v1", "MountainCar-v0"][0]
 
 if __name__ == "__main__":
-    main()
+    key = jr.key(1)
+    key, model_key, target_model_key, reset_key, loop_key, ikey = jr.split(key, 6)
+
+    env, env_params = gymnax.make(env_name)
+    obs, state = jax.vmap(lambda k: env.reset(k, env_params))(jr.split(reset_key, num_envs))
+    action_space = env.action_space(env_params)  # type: ignore
+
+    assert "n" in action_space.__dict__, (
+        "The environment is not discrete, or maybe incorrectly initialized"
+    )
+    act_size = action_space.__dict__.get("n", 2)
+    single_obs = obs[0]
+    obs_size = single_obs.size
+
+    model = Bootstrapped(
+        action_space=action_space,
+        model_factory=lambda k: Model(obs_size, act_size, key=k),
+        ensemble_size=ensemble_size,
+        rb=ReplayBuffer(10_000, single_obs, action_space.sample(key)),
+        key=model_key,
+    )
+
+    optim = optax.adamw(2e-4)
+    opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
+
+    def train(model, opt_state, key):
+        key, fkey = jr.split(key)
+
+        def loss_wrap(model):
+            keys = jr.split(fkey, batch_size)
+            loss, aux = eqx.filter_vmap(model.loss)(keys)
+            return loss.mean(), aux
+
+        (loss, info), grads = eqx.filter_value_and_grad(loss_wrap, has_aux=True)(model)
+        updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_inexact_array))
+        model = eqx.apply_updates(model, updates)
+        return model, opt_state, (*info, loss)
+
+    def eval_run(model, key):
+        key, reset_key, ikey = jr.split(key, 3)
+        obs, state = env.reset(reset_key, env_params)
+        init_carry = (key, obs, state, False, jnp.zeros(()))
+        index = jr.randint(ikey, (), 0, ensemble_size)
+
+        def _step(carry, _):
+            key, obs, state, done, ret = carry
+            key, act_key, step_key = jr.split(key, 3)
+
+            def env_step():
+                action = model.action(obs, act_key, epsilon=0.0, index=index)
+                obs2, state2, reward, done2, _ = env.step(step_key, state, action, env_params)
+                return (key, obs2, state2, done2, ret + reward)
+
+            return jax.lax.cond(done, lambda: (key, obs, state, done, ret), env_step), None
+
+        final_carry, _ = jax.lax.scan(_step, init_carry, xs=None, length=500)
+        _, _, _, _, episode_return = final_carry
+
+        return episode_return
+
+    @eqx.filter_jit
+    def step(model, obs_state, key, progress, model_indices):
+        obs, state = obs_state
+        step_key, key = jr.split(key)
+
+        eps = jnp.clip(1 - progress * 2, 0.05, 1.0)
+
+        def unbatched_step(key, state, obs, index):
+            act_key, step_key = jr.split(key)
+            action = model.action(obs, act_key, epsilon=eps, index=index)
+            return *env.step(step_key, state, action, env_params), action
+
+        n_obs, state, reward, done, _, action = eqx.filter_vmap(unbatched_step)(
+            jr.split(step_key, num_envs), state, obs, model_indices
+        )
+        # Note that the following does not follow the RP nor BS paper, but
+        # instead is more intuitive: we add the transitions only to our "own"
+        # buffers
+        for _ in range(2):
+            random_indices = jr.randint(key, model_indices.shape, 0, ensemble_size)
+            for i, model_index in zip(range(len(n_obs)), random_indices):
+                model = model.add_to_buffer(
+                    model_index, (obs[i], n_obs[i], action[i], reward[i], done[i])
+                )
+
+        obs = n_obs
+
+        return model, (obs, state), (done, reward)
+
+    # collect stuff for the replay buffer
+    for i in tqdm(range(10_000 // num_envs)):
+        key, subkey = jr.split(key)
+        for ind in range(ensemble_size):
+            model, (obs, state), info = step(
+                model, (obs, state), subkey, progress=0, model_indices=jnp.array([ind] * num_envs)
+            )
+
+    full_rewards = []
+    rews = np.zeros((num_envs,), dtype=np.int32)
+    num_steps = 500_000 // num_envs
+
+    model_indices = jr.randint(ikey, (num_envs,), 0, ensemble_size)
+
+    wandb.init(name=f"{type(model).__name__}-{env_name}//({ensemble_size})")
+    wandb.run.log_code(".")  # type: ignore
+    for i in (pbar := tqdm(range(num_steps))):
+        progress = jnp.clip(i / num_steps, 0.0, 1.0)
+        key, subkey, train_key = jr.split(key, 3)
+        model, (obs, state), (dones, c_rewards) = step(
+            model, (obs, state), subkey, progress, model_indices
+        )
+
+        model, opt_state, train_info = eqx.filter_jit(train)(model, opt_state, train_key)
+        wandb.log(
+            {
+                "qval": train_info[0].mean(),
+                "qtarget": train_info[1].mean(),
+                "tdloss": train_info[2].mean(),
+            },
+            commit=False,
+        )
+
+        rews += c_rewards
+        for j in range(len(dones)):
+            if dones[j]:
+                full_rewards.append(rews[j])
+                wandb.log({"train_reward": rews[j]}, commit=False)
+                model_indices = model_indices.at[j].set(jr.randint(key, (), 0, ensemble_size))
+                rews = rews.at[j].set(0)
+
+        if i % (500 // num_envs) == (500 // num_envs - 1):
+            model = eqx.tree_at(lambda m: m.target_model, model, model.model)
+
+        if i % 50 == 49:
+            reward = np.array(full_rewards[-3:]).mean()
+            pbar.set_description(f"At {progress:.2f} score: {reward:.2f}")
+
+        if i % (num_steps // 20) == (num_steps // 20) - 1:
+            key, eval_key = jr.split(key)
+            eval_rewards = eqx.filter_vmap(lambda k: eval_run(model, k))(
+                jr.split(eval_key, batch_size * 8)
+            )
+            wandb.log({"eval_reward": eval_rewards.mean()}, commit=False)
+            print(f"{eval_rewards.mean():.2f}+-{eval_rewards.std() / jnp.sqrt(batch_size * 8):.2f}")
+        wandb.log({}, commit=True)
