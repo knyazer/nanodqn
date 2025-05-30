@@ -18,7 +18,7 @@ os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
-jax.config.update("jax_persistent_cache_enable_xla_caches", "all")
+jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
 
 DOUBLE_DQN = False
@@ -205,16 +205,17 @@ class Bootstrapped(DQN):
 
 batch_size = 64
 lr = 1e-4
-num_envs = 10
+num_envs = 40
 ensemble_size = 4
 env_name = "DeepSea-bsuite"
+w_group = "boot4 sweep"
 
 
 def main(seed=0):
     key = jr.key(seed)
     key, model_key, target_model_key, reset_key, loop_key, ikey = jr.split(key, 6)
 
-    env, env_params = gymnax.make(env_name, size=32)
+    env, env_params = gymnax.make(env_name, size=50)
     obs, state = jax.vmap(lambda k: env.reset(k, env_params))(jr.split(reset_key, num_envs))
     action_space = env.action_space(env_params)  # type: ignore
 
@@ -328,7 +329,7 @@ def main(seed=0):
     jax.debug.print("Filled out the replay buffer. Starting training.")
 
     def init_wandb():
-        wandb.init(name=f"{type(model).__name__}-{env_name}//({ensemble_size})")
+        wandb.init(name=f"{type(model).__name__}-{env_name}//({ensemble_size})", group=w_group)
         wandb.run.log_code(".")  # type: ignore
 
     jax.debug.callback(init_wandb)
@@ -350,7 +351,7 @@ def main(seed=0):
             "qtarget": train_info[1].mean(),
             "tdloss": train_info[2].mean(),
             "train_reward": jax.lax.cond(
-                jnp.count_nonzero(dones) == 0, lambda: jnp.nan, lambda: (rews * dones).mean()
+                jnp.count_nonzero(dones) == 0, lambda: jnp.nan, lambda: (rews * dones).max()
             ),
         }
 
@@ -395,21 +396,52 @@ def main(seed=0):
 
         return model, obs, state, model_indices, opt_state, key, rews, _log
 
-    rews = np.zeros((num_envs,), dtype=np.int32)
-    num_steps = 500_000 // num_envs
+    rews = np.zeros((num_envs,), dtype=np.float32)
+    num_steps = 50_000 // num_envs
 
     model_indices = jr.randint(ikey, (num_envs,), 0, ensemble_size)
 
-    for i in range(num_steps):
-        model, obs, state, model_indices, opt_state, key, rews, _log = inner_loop(
-            model, obs, state, model_indices, opt_state, key, rews, jnp.array(i)
-        )
-        if _log["train_reward"] == jnp.nan:
-            del _log["train_reward"]
-        wandb.log({**_log})
+    def inner_loop_wrap(carry_dyn, i, carry_st):
+        carry = eqx.combine(carry_dyn, carry_st)
+        *new_carry, _log = inner_loop(*carry, i)
+        new_carry = eqx.filter(new_carry, eqx.is_array)
+        return tuple(new_carry), _log
 
+    @eqx.filter_jit
+    def fast_eval(model, key):
+        key, eval_key = jr.split(key)
+        eval_rewards = eqx.filter_vmap(lambda k: eval_run(model, k))(
+            jr.split(eval_key, batch_size * 4)
+        )
+        return eval_rewards.mean()
+
+    partial_fn = None
+    for i in range(0, num_steps, 50):
+        carry = (model, obs, state, model_indices, opt_state, key, rews)
+        carry_dyn, carry_st = eqx.partition(carry, eqx.is_array)
+        if partial_fn is None:
+            partial_fn = eqx.Partial(inner_loop_wrap, carry_st=carry_st)
+
+        carry_dyn, logs = jax.lax.scan(
+            partial_fn,
+            init=carry_dyn,
+            xs=jnp.arange(i, i + 50),
+        )
+        model, obs, state, model_indices, opt_state, key, rews = eqx.combine(carry_dyn, carry_st)
+
+        for j in range(len(logs[list(logs.keys())[0]])):
+            _log = {}
+            for k in logs:
+                _log[k] = logs[k][j]
+            if _log["train_reward"] == jnp.nan:
+                del _log["train_reward"]
+            wandb.log({**_log})
+        wandb.log({"eval_reward": fast_eval(model, key)})
+
+    wandb.finish()
     return model
 
 
 if __name__ == "__main__":
-    main()
+    for seed in range(12):
+        main(seed)
