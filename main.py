@@ -62,15 +62,21 @@ class Model(eqx.Module):
 
 class ModelWithPrior(Model):
     prior: Model
+    scale: Float[Array, ""]
 
-    def __init__(self, observation_size, action_size, /, key, layer_sizes=None):
+    def __init__(self, observation_size, action_size, /, scale, key, layer_sizes=None):
         k1, k2 = jr.split(key)
         super().__init__(observation_size, action_size, key=k1, layer_sizes=layer_sizes)
 
         self.prior = Model(observation_size, action_size, key=k2, layer_sizes=layer_sizes)
+        self.scale = scale
+        # we interpret "scaling MLP by beta" by "scaling each parameter of MLP by beta"
+        # self.prior = jax.tree.map(
+        #    lambda node: node * self.scale if eqx.is_inexact_array(node) else node, self.prior
+        # )
 
     def __call__(self, x):
-        return super().__call__(x) + jax.lax.stop_gradient(self.prior(x))
+        return super().__call__(x) + jax.lax.stop_gradient(self.prior(x) * self.scale)
 
 
 gamma = 0.99
@@ -111,6 +117,9 @@ class DQN(eqx.Module):
         q_pred = model(sample.observations.squeeze())
         q_pred = q_pred[sample.actions]
         return ((q_pred - next_q_value) ** 2).mean(), (q_pred, next_q_value)
+
+    def action(self, observation: Any, *args, **kwargs):
+        return self.model(observation).argmax()
 
     def add_to_buffer(self, *data):
         return eqx.tree_at(lambda s: s.replay_buffer, self, self.replay_buffer.add(*data))
@@ -207,8 +216,12 @@ batch_size = 64
 lr = 1e-4
 num_envs = 40
 ensemble_size = 4
+prior_scale = 3
 env_name = "DeepSea-bsuite"
-w_group = "boot4 sweep"
+kind = "dqn"
+w_group = f"{kind} {env_name}"
+
+assert kind in ["boot", "bootrp", "eps", "dqn"]
 
 
 def main(seed=0):
@@ -226,22 +239,40 @@ def main(seed=0):
     single_obs = obs[0]
     obs_size = single_obs.size
 
-    model = Bootstrapped(
-        action_space=action_space,
-        model_factory=lambda k: Model(obs_size, act_size, key=k),
-        ensemble_size=ensemble_size,
-        rb=ReplayBuffer(10_000, single_obs, action_space.sample(key)),
-        key=model_key,
-    )
-
-    """
-    model = EpsilonGreedy(
-        action_space=action_space,
-        model_factory=lambda k: Model(obs_size, act_size, key=k),
-        rb=ReplayBuffer(10_000, single_obs, action_space.sample(key)),
-        key=model_key,
-    )
-    """
+    if kind == "boot":
+        model = Bootstrapped(
+            action_space=action_space,
+            model_factory=lambda k: Model(obs_size, act_size, key=k),
+            ensemble_size=ensemble_size,
+            rb=ReplayBuffer(10_000, single_obs, action_space.sample(key)),
+            key=model_key,
+        )
+    elif kind == "bootrp":
+        model = Bootstrapped(
+            action_space=action_space,
+            model_factory=lambda k: ModelWithPrior(obs_size, act_size, scale=prior_scale, key=k),
+            ensemble_size=ensemble_size,
+            rb=ReplayBuffer(10_000, single_obs, action_space.sample(key)),
+            key=model_key,
+        )
+    elif kind == "eps":
+        model = EpsilonGreedy(
+            action_space=action_space,
+            model_factory=lambda k: Model(obs_size, act_size, key=k),
+            rb=ReplayBuffer(10_000, single_obs, action_space.sample(key)),
+            key=model_key,
+        )
+    elif kind == "dqn":
+        model = DQN(
+            action_space=action_space,
+            model_factory=lambda k: Model(obs_size, act_size, key=k),
+            rb=ReplayBuffer(10_000, single_obs, action_space.sample(key)),
+            key=model_key,
+        )
+    else:
+        raise TypeError(
+            f"{kind} of the model is undefined, only allowed ['eps', 'boot', 'bootrp', 'dqn']"
+        )
 
     optim = optax.adamw(lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
@@ -329,7 +360,7 @@ def main(seed=0):
     jax.debug.print("Filled out the replay buffer. Starting training.")
 
     def init_wandb():
-        wandb.init(name=f"{type(model).__name__}-{env_name}//({ensemble_size})", group=w_group)
+        wandb.init(name=f"{kind}-{env_name}({ensemble_size})", group=w_group)
         wandb.run.log_code(".")  # type: ignore
 
     jax.debug.callback(init_wandb)
@@ -376,23 +407,6 @@ def main(seed=0):
                 lambda: model.target_model,
             ),
         )
-
-        """
-        def fast_eval(model, key):
-            key, eval_key = jr.split(key)
-            eval_rewards = eqx.filter_vmap(lambda k: eval_run(model, k))(
-                jr.split(eval_key, batch_size * 8)
-            )
-            _log({"eval_reward": eval_rewards.mean()})
-            jax.debug.print("Eval reward: {}", eval_rewards.mean())
-            return key
-
-        key = jax.lax.cond(
-            i % (num_steps // 20) == (num_steps // 20) - 1,
-            lambda: fast_eval(model, key),
-            lambda: key,
-        )
-        """
 
         return model, obs, state, model_indices, opt_state, key, rews, _log
 

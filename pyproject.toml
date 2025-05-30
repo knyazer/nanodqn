@@ -1,7 +1,7 @@
 [project]
 name = "nanodqn"
-version = "0.1.0"
-description = "Reimplementation of CleanRL DQN in JAX+Equinox and jaxtyping"
+version = "0.2.0"
+description = "DQN in JAX+Equinox and jaxtyping"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
