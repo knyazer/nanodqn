@@ -218,7 +218,7 @@ num_envs = 40
 ensemble_size = 4
 prior_scale = 3
 env_name = "DeepSea-bsuite"
-kind = "dqn"
+kind = "bootrp"
 w_group = f"{kind} {env_name}"
 
 assert kind in ["boot", "bootrp", "eps", "dqn"]
@@ -382,7 +382,7 @@ def main(seed=0):
             "qtarget": train_info[1].mean(),
             "tdloss": train_info[2].mean(),
             "train_reward": jax.lax.cond(
-                jnp.count_nonzero(dones) == 0, lambda: jnp.nan, lambda: (rews * dones).max()
+                jnp.count_nonzero(dones) == 0, lambda: jnp.nan, lambda: rews[jnp.argmax(dones)]
             ),
         }
 
