@@ -124,9 +124,20 @@ class DQN(eqx.Module):
     def add_to_buffer(self, *data):
         return eqx.tree_at(lambda s: s.replay_buffer, self, self.replay_buffer.add(*data))
 
-    def sync_target(self):
-        self = eqx.tree_at(lambda m: m.target_model, self, self.model)
-        return self
+class AMCDQN(eqx.Module):
+    """
+        This class implements Adaptive MCMC DQN: sample a bunch of networks
+        from a hypernetwork, backprop them for a bit (and fill the buffer with
+        new transitions), and then do a single step on the VI model updating to the
+        new posterior. As of now, the VI model is a normal.
+
+
+        So, e.g. once every 20-ish steps of gradient descent, we do a single step on
+        the VI model, resample the self.model to get the new ones, update the self.target_model
+        to be the current self.model ones (the just-resampled ones) and then train for a bit again
+    """
+    ...
+
 
 
 class EpsilonGreedy(DQN):
