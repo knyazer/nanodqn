@@ -124,20 +124,21 @@ class DQN(eqx.Module):
     def add_to_buffer(self, *data):
         return eqx.tree_at(lambda s: s.replay_buffer, self, self.replay_buffer.add(*data))
 
+
 class AMCDQN(eqx.Module):
     """
-        This class implements Adaptive MCMC DQN: sample a bunch of networks
-        from a hypernetwork, backprop them for a bit (and fill the buffer with
-        new transitions), and then do a single step on the VI model updating to the
-        new posterior. As of now, the VI model is a normal.
+    This class implements Adaptive MCMC DQN: sample a bunch of networks
+    from a hypernetwork, backprop them for a bit (and fill the buffer with
+    new transitions), and then do a single step on the VI model updating to the
+    new posterior. As of now, the VI model is a normal.
 
 
-        So, e.g. once every 20-ish steps of gradient descent, we do a single step on
-        the VI model, resample the self.model to get the new ones, update the self.target_model
-        to be the current self.model ones (the just-resampled ones) and then train for a bit again
+    So, e.g. once every 20-ish steps of gradient descent, we do a single step on
+    the VI model, resample the self.model to get the new ones, update the self.target_model
+    to be the current self.model ones (the just-resampled ones) and then train for a bit again
     """
-    ...
 
+    ...
 
 
 class EpsilonGreedy(DQN):
@@ -223,14 +224,16 @@ class Bootstrapped(DQN):
         return single_model(observation).argmax()
 
 
-batch_size = 64
+batch_size = 32
 lr = 1e-4
-num_envs = 40
-ensemble_size = 4
+num_envs = 20
+ensemble_size = 10
 prior_scale = 3
 env_name = "DeepSea-bsuite"
-kind = "bootrp"
+kind = "boot"
 w_group = f"{kind} {env_name}"
+if "boot" in kind:
+    w_group += str(ensemble_size)
 
 assert kind in ["boot", "bootrp", "eps", "dqn"]
 
@@ -288,7 +291,7 @@ def main(seed=0):
     optim = optax.adamw(lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
 
-    @eqx.filter_jit
+    @eqx.filter_jit(donate="all")
     def train(model, opt_state, key):
         key, fkey = jr.split(key)
 
@@ -376,7 +379,7 @@ def main(seed=0):
 
     jax.debug.callback(init_wandb)
 
-    @eqx.filter_jit
+    @eqx.filter_jit(donate="all")
     def inner_loop(model, obs, state, model_indices, opt_state, key, rews, i):
         progress = jnp.clip(i / num_steps, 0.0, 1.0)
         key, subkey, train_key = jr.split(key, 3)
@@ -441,7 +444,7 @@ def main(seed=0):
         return eval_rewards.mean()
 
     partial_fn = None
-    for i in range(0, num_steps, 50):
+    for i in range(0, num_steps, 10):
         carry = (model, obs, state, model_indices, opt_state, key, rews)
         carry_dyn, carry_st = eqx.partition(carry, eqx.is_array)
         if partial_fn is None:
@@ -450,7 +453,7 @@ def main(seed=0):
         carry_dyn, logs = jax.lax.scan(
             partial_fn,
             init=carry_dyn,
-            xs=jnp.arange(i, i + 50),
+            xs=jnp.arange(i, i + 10),
         )
         model, obs, state, model_indices, opt_state, key, rews = eqx.combine(carry_dyn, carry_st)
 
@@ -468,5 +471,5 @@ def main(seed=0):
 
 
 if __name__ == "__main__":
-    for seed in range(12):
+    for seed in range(50):
         main(seed)
