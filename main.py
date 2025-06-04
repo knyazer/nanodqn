@@ -12,6 +12,7 @@ from tqdm import tqdm as tqdm
 import optax
 import wandb
 import os
+import pandas as pd
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 
@@ -212,40 +213,35 @@ class Bootstrapped(DQN):
         return single_model(observation).argmax()
 
 
-batch_size = 128
-lr = 1e-4
-num_envs = 16
-ensemble_size = 4
-prior_scale = 3
-env_name = "DeepSea-bsuite"
-kind = "dqn"
-prefix = "j3m"
-hardness = 100
+class Config(eqx.Module):
+    batch_size: int = 128
+    lr: float = 1e-4
+    num_envs: int = 16
+    ensemble_size: int = 4
+    prior_scale: float = 3
+    env_name: str = "DeepSea-bsuite"
+    kind: str = "dqn"
+    prefix: str = "j4"
+    hardness: int = 24
 
-w_group = f"{prefix} {kind} {env_name}={hardness} "
-if "boot" in kind:
-    w_group += f"K={ensemble_size}"
-
-
-def update_hyps(new_kind, new_size=1):
-    global kind, w_group, ensemble_size
-    kind = new_kind
-    ensemble_size = new_size
-
-    w_group = f"{prefix} {kind} {env_name}={hardness} "
-    if "boot" in kind:
-        w_group += f"K={ensemble_size}"
+    def __str__(self):
+        return f"{self.prefix} {self.kind}({self.ensemble_size}) {self.env_name}({self.hardness})"
 
 
-assert kind in ["boot", "bootrp", "eps", "dqn"]
-
-
-def main(seed=0):
+@eqx.filter_jit
+def main(seed=0, cfg=Config(), debug=True):
+    if debug:
+        jax.debug.print(
+            "Main is running with: kind={}, ensemble_size={}, hardness={}",
+            cfg.kind,
+            cfg.ensemble_size,
+            cfg.hardness,
+        )
     key = jr.key(seed)
     key, model_key, target_model_key, reset_key, loop_key, ikey = jr.split(key, 6)
 
-    env, env_params = gymnax.make(env_name, size=hardness)
-    obs, state = jax.vmap(lambda k: env.reset(k, env_params))(jr.split(reset_key, num_envs))
+    env, env_params = gymnax.make(cfg.env_name, size=cfg.hardness)
+    obs, state = jax.vmap(lambda k: env.reset(k, env_params))(jr.split(reset_key, cfg.num_envs))
     action_space = env.action_space(env_params)  # type: ignore
 
     assert "n" in action_space.__dict__, (
@@ -255,7 +251,7 @@ def main(seed=0):
     single_obs = obs[0]
     obs_size = single_obs.size
 
-    rb_mask_size = ensemble_size if "boot" in kind else 1
+    rb_mask_size = cfg.ensemble_size if "boot" in cfg.kind else 1
 
     rb = ReplayBuffer.make(
         10_000,
@@ -264,27 +260,29 @@ def main(seed=0):
         mask_size=rb_mask_size,
     )
 
-    if kind == "boot":
+    if cfg.kind == "boot":
         model = Bootstrapped(
             action_space=action_space,
             model_factory=lambda k: Model(obs_size, act_size, key=k),
-            ensemble_size=ensemble_size,
+            ensemble_size=cfg.ensemble_size,
             key=model_key,
         )
-    elif kind == "bootrp":
+    elif cfg.kind == "bootrp":
         model = Bootstrapped(
             action_space=action_space,
-            model_factory=lambda k: ModelWithPrior(obs_size, act_size, scale=prior_scale, key=k),
-            ensemble_size=ensemble_size,
+            model_factory=lambda k: ModelWithPrior(
+                obs_size, act_size, scale=cfg.prior_scale, key=k
+            ),
+            ensemble_size=cfg.ensemble_size,
             key=model_key,
         )
-    elif kind == "eps":
+    elif cfg.kind == "eps":
         model = EpsilonGreedy(
             action_space=action_space,
             model_factory=lambda k: Model(obs_size, act_size, key=k),
             key=model_key,
         )
-    elif kind == "dqn":
+    elif cfg.kind == "dqn":
         model = DQN(
             action_space=action_space,
             model_factory=lambda k: Model(obs_size, act_size, key=k),
@@ -292,19 +290,50 @@ def main(seed=0):
         )
     else:
         raise TypeError(
-            f"{kind} of the model is undefined, only allowed ['eps', 'boot', 'bootrp', 'dqn']"
+            f"{cfg.kind} of the model is undefined, only allowed ['eps', 'boot', 'bootrp', 'dqn']"
         )
 
-    optim = optax.adamw(lr)
+    optim = optax.adamw(cfg.lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
+
+    @eqx.filter_jit
+    def eval_model(model, key):
+        @eqx.filter_jit
+        def eval_run(model, key):
+            key, reset_key, ikey = jr.split(key, 3)
+            obs, state = env.reset(reset_key, env_params)
+            init_carry = (key, obs, state, False, jnp.zeros(()))
+            index = jr.randint(ikey, (), 0, cfg.ensemble_size)
+
+            def _step(carry, _):
+                key, obs, state, done, ret = carry
+                key, act_key, step_key = jr.split(key, 3)
+
+                def env_step():
+                    action = model.action(obs, act_key, epsilon=0.0, index=index)
+                    obs2, state2, reward, done2, _ = env.step(step_key, state, action, env_params)
+                    return (key, obs2, state2, done2, ret + reward)
+
+                return jax.lax.cond(done, lambda: (key, obs, state, done, ret), env_step), None
+
+            final_carry, _ = jax.lax.scan(_step, init_carry, xs=None, length=hardness)
+            _, _, _, _, episode_return = final_carry
+
+            return episode_return
+
+        key, eval_key = jr.split(key)
+        eval_rewards = eqx.filter_vmap(lambda k: eval_run(model, k))(
+            jr.split(eval_key, cfg.batch_size * 4)
+        )
+        return eval_rewards.mean()
 
     @eqx.filter_jit(donate="all-except-first")
     def train(rb, model, opt_state, key):
         key, fkey = jr.split(key)
 
         def loss_wrap(model):
-            keys = jr.split(fkey, batch_size)
-            samples = rb.sample(key, batch_size)
+            keys = jr.split(fkey, cfg.batch_size)
+            samples = rb.sample(key, cfg.batch_size)
             loss, aux = eqx.filter_vmap(model.loss)(keys, samples)
             return loss.mean(), aux
 
@@ -312,29 +341,6 @@ def main(seed=0):
         updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_inexact_array))
         model = eqx.apply_updates(model, updates)
         return model, opt_state, (*info, loss)
-
-    @eqx.filter_jit
-    def eval_run(model, key):
-        key, reset_key, ikey = jr.split(key, 3)
-        obs, state = env.reset(reset_key, env_params)
-        init_carry = (key, obs, state, False, jnp.zeros(()))
-        index = jr.randint(ikey, (), 0, ensemble_size)
-
-        def _step(carry, _):
-            key, obs, state, done, ret = carry
-            key, act_key, step_key = jr.split(key, 3)
-
-            def env_step():
-                action = model.action(obs, act_key, epsilon=0.0, index=index)
-                obs2, state2, reward, done2, _ = env.step(step_key, state, action, env_params)
-                return (key, obs2, state2, done2, ret + reward)
-
-            return jax.lax.cond(done, lambda: (key, obs, state, done, ret), env_step), None
-
-        final_carry, _ = jax.lax.scan(_step, init_carry, xs=None, length=500)
-        _, _, _, _, episode_return = final_carry
-
-        return episode_return
 
     @eqx.filter_jit
     def step(model, rb, obs_state, key, progress, model_indices):
@@ -349,7 +355,7 @@ def main(seed=0):
             return *env.step(step_key, state, action, env_params), action
 
         n_obs, state, reward, done, _, action = eqx.filter_vmap(unbatched_step)(
-            jr.split(step_key, num_envs), state, obs, model_indices
+            jr.split(step_key, cfg.num_envs), state, obs, model_indices
         )
         # Note that the following does not follow the RP nor BS paper, but
         # instead is more intuitive: we add the transitions only to our "own"
@@ -367,37 +373,43 @@ def main(seed=0):
 
         return model, rb, (obs, state), (done, reward)
 
-    jax.debug.print("Starting to fill the replay buffer...")
+    if debug:
+        jax.debug.print("Starting to fill the replay buffer...")
 
     # collect stuff for the replay buffer
-    for i in range(10_000 // num_envs):
+    def rb_scan_fn(carry_dyn, key, carry_st):
+        carry = eqx.combine(carry_dyn, carry_st)
+        model, rb, (obs, state) = carry
         key, subkey = jr.split(key)
-        for ind in range(ensemble_size):
-            model, rb, (obs, state), info = step(
-                model,
-                rb,
-                (obs, state),
-                subkey,
-                progress=0,
-                model_indices=jnp.array([ind] * num_envs),
-            )
-        if rb.full:
-            break
+        model, rb, (obs, state), _ = step(
+            model,
+            rb,
+            (obs, state),
+            subkey,
+            progress=0,
+            model_indices=jnp.arange(cfg.num_envs),
+        )
+        carry = (model, rb, (obs, state))
+        carry_dyn, _ = eqx.partition(carry, eqx.is_array)
+        return carry_dyn, None
 
-    assert rb.full, f"{rb.pos} is not big enough, buffer not filled"
+    carry = (model, rb, (obs, state))
+    carry_dyn, carry_st = eqx.partition(carry, eqx.is_array)
+    n_iters = rb.buffer_size // cfg.num_envs
+    carry_dyn, _ = jax.lax.scan(
+        eqx.Partial(rb_scan_fn, carry_st=carry_st), init=carry_dyn, xs=jr.split(key, n_iters)
+    )
+    carry = eqx.combine(carry_dyn, carry_st)
+    model, rb, (obs, state) = carry
 
-    jax.debug.print("Filled out the replay buffer. Starting training.")
-
-    def init_wandb():
-        wandb.init(name=f"{kind}-{env_name}({ensemble_size})", group=w_group, save_code=True)
-
-    jax.debug.callback(init_wandb)
+    if debug:
+        jax.debug.print("Filled out the replay buffer. Starting training.")
 
     @eqx.filter_jit(donate="all")
     def inner_loop(model, rb, obs, state, model_indices, opt_state, key, rews, i):
         progress = jnp.clip(i / num_steps, 0.0, 1.0)
         key, subkey, train_key = jr.split(key, 3)
-        d_key = jr.split(subkey, num_envs)
+        d_key = jr.split(subkey, cfg.num_envs)
         model, rb, (obs, state), (dones, c_rewards) = step(
             model, rb, (obs, state), subkey, progress, model_indices
         )
@@ -409,28 +421,33 @@ def main(seed=0):
             "qval": train_info[0].mean(),
             "qtarget": train_info[1].mean(),
             "tdloss": train_info[2].mean(),
-            "train_reward": jax.lax.cond(
-                jnp.count_nonzero(dones) == 0, lambda: jnp.nan, lambda: rews[jnp.argmax(dones)]
-            ),
+            "train_reward": jnp.where(dones, rews, jnp.nan),
+            "model_indices": model_indices,
         }
 
         def episode_done(rews, model_indices, j):
-            model_indices = model_indices.at[j].set(jr.randint(d_key[j], (), 0, ensemble_size))
+            model_indices = model_indices.at[j].set(jr.randint(d_key[j], (), 0, cfg.ensemble_size))
             rews = rews.at[j].set(0)
             return rews, model_indices
 
-        for j in range(len(dones)):
-            rews, model_indices = jax.lax.cond(
-                dones[j],
-                lambda: episode_done(rews, model_indices, j),
-                lambda: (rews, model_indices),
-            )
+        (rews, model_indices), _ = jax.lax.scan(
+            lambda carry, j: (
+                jax.lax.cond(
+                    dones[j],
+                    lambda: episode_done(*carry, j),
+                    lambda: carry,
+                ),
+                None,
+            ),
+            init=(rews, model_indices),
+            xs=jnp.arange(len(dones)),
+        )
 
         model = eqx.tree_at(
             lambda _m: _m.target_model,
             model,
             jax.lax.cond(
-                i % (500 // num_envs) == (500 // num_envs - 1),
+                i % (500 // cfg.num_envs) == (500 // cfg.num_envs - 1),
                 lambda: model.model,
                 lambda: model.target_model,
             ),
@@ -438,10 +455,10 @@ def main(seed=0):
 
         return model, rb, obs, state, model_indices, opt_state, key, rews, _log
 
-    rews = np.zeros((num_envs,), dtype=np.float32)
-    num_steps = 100_000 // num_envs
+    rews = np.zeros((cfg.num_envs,), dtype=np.float32)
+    num_steps = 100_000 // cfg.num_envs
 
-    model_indices = jr.randint(ikey, (num_envs,), 0, ensemble_size)
+    model_indices = jr.randint(ikey, (cfg.num_envs,), 0, cfg.ensemble_size)
 
     def inner_loop_wrap(carry_dyn, i, carry_st):
         carry = eqx.combine(carry_dyn, carry_st)
@@ -449,60 +466,92 @@ def main(seed=0):
         new_carry = eqx.filter(new_carry, eqx.is_array)
         return tuple(new_carry), _log
 
-    @eqx.filter_jit
-    def fast_eval(model, key):
-        key, eval_key = jr.split(key)
-        eval_rewards = eqx.filter_vmap(lambda k: eval_run(model, k))(
-            jr.split(eval_key, batch_size * 4)
-        )
-        return eval_rewards.mean()
+    carry = (model, rb, obs, state, model_indices, opt_state, key, rews)
+    carry_dyn, carry_st = eqx.partition(carry, eqx.is_array)
+    partial_fn = eqx.Partial(inner_loop_wrap, carry_st=carry_st)
 
-    partial_fn = None
-    for i in range(0, num_steps, 100):
-        carry = (model, rb, obs, state, model_indices, opt_state, key, rews)
-        carry_dyn, carry_st = eqx.partition(carry, eqx.is_array)
-        if partial_fn is None:
-            partial_fn = eqx.Partial(inner_loop_wrap, carry_st=carry_st)
+    carry_dyn, logs = jax.lax.scan(
+        partial_fn,
+        init=carry_dyn,
+        xs=jnp.arange(num_steps),
+    )
+    model, rb, obs, state, model_indices, opt_state, key, rews = eqx.combine(carry_dyn, carry_st)
 
-        carry_dyn, logs = jax.lax.scan(
-            partial_fn,
-            init=carry_dyn,
-            xs=jnp.arange(i, i + 100),
-        )
-        model, rb, obs, state, model_indices, opt_state, key, rews = eqx.combine(
-            carry_dyn, carry_st
-        )
+    return model, logs
 
-        for j in range(len(logs[list(logs.keys())[0]])):
-            _log = {}
-            for k in logs:
-                _log[k] = logs[k][j]
-            if _log["train_reward"] == jnp.nan:
-                del _log["train_reward"]
-            wandb.log({**_log})
-        wandb.log({"eval_reward": fast_eval(model, key)})
+
+def make_wandb_run_from_logs(cfg, logs):
+    wandb.init(name=str(cfg), group=str(cfg), save_code=True)
+    for j in range(len(logs[list(logs.keys())[0]])):
+        _log = {}
+        for k in logs:
+            _log[k] = logs[k][j]
+        if _log["train_reward"] == jnp.nan:
+            del _log["train_reward"]
+        wandb.log({**_log})
 
     wandb.finish()
-    return model
+
+
+max_trainings_in_parallel = 20
+
+
+def schedule_runs(kind, N, ensemble_size=1):
+    cfg = Config(kind=kind, ensemble_size=ensemble_size)
+    print(f"Starting the run scheduler with {kind}{ensemble_size}, N={N}")
+    results = []
+    thresh = 0.95
+    for i in tqdm(range(0, N, max_trainings_in_parallel)):
+        _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg))(
+            jnp.arange(i, i + max_trainings_in_parallel)
+        )
+        for tr, m_indices in zip(logs["train_reward"], logs["model_indices"]):
+            tr = np.array(tr)
+            mask = np.logical_not(np.isnan(tr))
+            tr, m_indices = tr[mask], m_indices[mask]
+
+            # weak convergence is "at least one model solves the problem"
+            weak_convergence = tr.max() >= thresh
+            time_to_weak = (tr >= thresh).argmax() if weak_convergence else len(tr)
+
+            # strong convergence is "all models solve the problem"
+            # thus for normal dqn they are the same, but for boot - not
+            strong_convergence = True
+            time_to_strong = 0
+            for _m_id in range(ensemble_size):
+                # note that strong convergence is reported in "steps of all members"
+                # not "steps of this particular member" for consistency
+                member_convergence = np.logical_and(tr >= thresh, _m_id == m_indices)
+                strong_convergence &= member_convergence.any()
+                time_to_strong = max(
+                    member_convergence.argmax() if member_convergence.any() else len(tr),
+                    time_to_strong,
+                )
+
+            results.append(
+                {
+                    "weak_convergence": weak_convergence,
+                    "time_to_weak": time_to_weak,
+                    "strong_convergence": strong_convergence,
+                    "time_to_strong": time_to_strong,
+                }
+            )
+            tqdm.write(f"{results[-1]}")
+
+    pd.DataFrame(results).to_csv(f"results/N={N}_{kind}{ensemble_size}.csv")
+    return results
 
 
 if __name__ == "__main__":
-    update_hyps("boot", 20)
+    N = 100
+    schedule_runs("boot", N=N, ensemble_size=2)
+    schedule_runs("boot", N=N, ensemble_size=4)
+    schedule_runs("dqn", N=N)
 
-    for seed in range(100):
-        main(seed)
-
-    update_hyps("boot", 10)
-
-    for seed in range(100):
-        main(seed)
-
-    update_hyps("boot", 4)
-
-    for seed in range(100):
-        main(seed)
-
-    update_hyps("dqn")
-
-    for seed in range(100):
-        main(seed)
+    schedule_runs("boot", N=N, ensemble_size=1)
+    schedule_runs("boot", N=N, ensemble_size=3)
+    schedule_runs("boot", N=N, ensemble_size=5)
+    """
+    for ens_size in range(2, 10):
+        schedule_runs("boot", N=100, ensemble_size=ens_size)
+    """
