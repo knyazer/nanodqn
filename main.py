@@ -493,7 +493,7 @@ def make_wandb_run_from_logs(cfg, logs):
     wandb.finish()
 
 
-max_trainings_in_parallel = 20
+max_trainings_in_parallel = 50
 
 
 def schedule_runs(kind, N, ensemble_size=1):
@@ -543,15 +543,8 @@ def schedule_runs(kind, N, ensemble_size=1):
 
 
 if __name__ == "__main__":
-    N = 100
-    schedule_runs("boot", N=N, ensemble_size=2)
-    schedule_runs("boot", N=N, ensemble_size=4)
+    N = 1000
     schedule_runs("dqn", N=N)
 
-    schedule_runs("boot", N=N, ensemble_size=1)
-    schedule_runs("boot", N=N, ensemble_size=3)
-    schedule_runs("boot", N=N, ensemble_size=5)
-    """
-    for ens_size in range(2, 10):
-        schedule_runs("boot", N=100, ensemble_size=ens_size)
-    """
+    for ens_size in range(2, 12):
+        schedule_runs("boot", N=N, ensemble_size=ens_size)
