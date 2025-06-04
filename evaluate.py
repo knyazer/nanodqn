@@ -3,8 +3,8 @@ import pandas as pd
 from scipy.stats import binomtest
 import warnings
 
-root_dir = Path("results")
-csv_files = sorted(root_dir.rglob("*.csv"))
+root_dir = Path("results/01")
+csv_files = sorted(root_dir.glob("*.csv"))
 
 CONF = 0.95  # confidence level
 for csv_file in csv_files:

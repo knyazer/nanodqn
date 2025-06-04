@@ -13,6 +13,10 @@ import optax
 import wandb
 import os
 import pandas as pd
+import yaml
+import random
+import dataclasses
+from pathlib import Path
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 
@@ -221,15 +225,17 @@ class Config(eqx.Module):
     prior_scale: float = 3
     env_name: str = "DeepSea-bsuite"
     kind: str = "dqn"
-    prefix: str = "j4"
     hardness: int = 24
 
     def __str__(self):
-        return f"{self.prefix} {self.kind}({self.ensemble_size}) {self.env_name}({self.hardness})"
+        return f"{self.kind}({self.ensemble_size})_{self.env_name}({self.hardness})"
+
+    def short_str(self):
+        return str(self)
 
 
 @eqx.filter_jit
-def main(seed=0, cfg=Config(), debug=True):
+def main(seed=0, cfg=Config(), debug=False):
     if debug:
         jax.debug.print(
             "Main is running with: kind={}, ensemble_size={}, hardness={}",
@@ -493,15 +499,39 @@ def make_wandb_run_from_logs(cfg, logs):
     wandb.finish()
 
 
-max_trainings_in_parallel = 180
+max_trainings_in_parallel = 10
 
 
-def schedule_runs(kind, N, ensemble_size=1):
-    cfg = Config(kind=kind, ensemble_size=ensemble_size)
-    print(f"Starting the run scheduler with {kind}{ensemble_size}, N={N}")
+def schedule_runs(N: int, cfg: Config, output_root: str = "results"):
+    VERSION = 1
+    run_name_base = f"N={N}_{cfg.short_str()}"
+    run_name = run_name_base
+    folder_path = Path(output_root) / run_name
+
+    def _random_suffix(length: int = 4) -> str:
+        alphabet = "0123456789abcdef"
+        return "".join(random.choice(alphabet) for _ in range(length))
+
+    while folder_path.exists():
+        run_name = f"{run_name_base}_{_random_suffix()}"
+        folder_path = Path(output_root) / run_name
+    folder_path.mkdir(parents=True)
+
+    with open(folder_path / "config.yaml", "w") as f:
+        yaml.safe_dump(dataclasses.asdict(cfg), f)
+
+    with open(folder_path / ".version", "w") as f:
+        f.write(f"{VERSION}")
+
     results = []
     thresh = 0.95
-    for i in tqdm(range(0, N, max_trainings_in_parallel)):
+
+    tqdm.write(f"Starting the run scheduler with {cfg.short_str()}, N={N}")
+
+    pbar = range(0, N, max_trainings_in_parallel)
+    if N >= max_trainings_in_parallel * 5:
+        pbar = tqdm(pbar)
+    for i in pbar:
         _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg))(
             jnp.arange(i, i + max_trainings_in_parallel)
         )
@@ -510,17 +540,12 @@ def schedule_runs(kind, N, ensemble_size=1):
             mask = np.logical_not(np.isnan(tr))
             tr, m_indices = tr[mask], m_indices[mask]
 
-            # weak convergence is "at least one model solves the problem"
             weak_convergence = tr.max() >= thresh
             time_to_weak = (tr >= thresh).argmax() if weak_convergence else len(tr)
 
-            # strong convergence is "all models solve the problem"
-            # thus for normal dqn they are the same, but for boot - not
             strong_convergence = True
             time_to_strong = 0
-            for _m_id in range(ensemble_size):
-                # note that strong convergence is reported in "steps of all members"
-                # not "steps of this particular member" for consistency
+            for _m_id in range(cfg.ensemble_size):
                 member_convergence = np.logical_and(tr >= thresh, _m_id == m_indices)
                 strong_convergence &= member_convergence.any()
                 time_to_strong = max(
@@ -538,13 +563,18 @@ def schedule_runs(kind, N, ensemble_size=1):
             )
             tqdm.write(f"{results[-1]}")
 
-    pd.DataFrame(results).to_csv(f"results/N={N}_{kind}{ensemble_size}.csv")
+    pd.DataFrame(results).to_csv(folder_path / "results.csv", index=False)
     return results
 
 
 if __name__ == "__main__":
-    N = 1000
-    schedule_runs("dqn", N=N)
+    N = 10
+    for hardness in tqdm(range(8, 51, 2)):
+        schedule_runs(N, cfg=Config(kind="dqn", hardness=hardness))
+        for ens_size in tqdm(range(2, 11, 2)):
+            schedule_runs(N, cfg=Config(kind="boot", ensemble_size=ens_size, hardness=hardness))
 
+    """
     for ens_size in range(2, 11):
         schedule_runs("boot", N=N, ensemble_size=ens_size)
+    """
