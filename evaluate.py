@@ -1,28 +1,48 @@
 from pathlib import Path
 import pandas as pd
+import numpy as np
 from scipy.stats import binomtest
-import warnings
+import matplotlib.pyplot as plt
 
-root_dir = Path("results/01")
-csv_files = sorted(root_dir.glob("*.csv"))
+root = Path("results/01")
+files = sorted(root.glob("*.csv"))
 
-CONF = 0.95  # confidence level
-for csv_file in csv_files:
-    df = pd.read_csv(csv_file)
-    n_all = len(df)
-    if n_all == 0:
-        warnings.warn(f"{csv_file.name} is empty – skipping.")
-        continue
+K, p, lo, hi = [], [], [], []
+p_dqn = None
 
-    n_weak = df["weak_convergence"].sum()
-    p_hat = n_weak / n_all
+for f in files:
+    df = pd.read_csv(f)
+    k = df["weak_convergence"].sum()
+    n = len(df)
+    phat = k / n
+    ci = binomtest(k, n).proportion_ci(method="exact")
+    if "dqn" in f.stem:
+        p_dqn = phat  # baseline for theory curve
+    else:
+        K.append(int(f.stem.split("boot")[1]))
+        p.append(phat)
+        lo.append(ci.low)
+        hi.append(ci.high)
 
-    ci = binomtest(k=n_weak, n=n_all).proportion_ci(
-        confidence_level=CONF,
-        method="exact",  # since we have k ~= n, Clopper-Pearson is better
-    )
+if p_dqn is None:
+    raise RuntimeError("no dqn file found")
 
-    print(
-        f"{csv_file.name}: \tp_weak = {p_hat:.3f}\t"
-        f"({int(CONF * 100)}% CI [{ci.low:.3f}, {ci.high:.3f}])"
-    )
+K = np.array(K)
+p = np.array(p)
+lo = np.array(lo)
+hi = np.array(hi)
+pred = 1 - (1.0 - p_dqn) ** K
+
+plt.figure()
+plt.fill_between(K, lo, hi, alpha=0.3)
+plt.plot(K, p, "o-", label="empirical $p_{weak}$")
+plt.plot(K, pred, "s--", label=r"$1-p_{weak,dqn}^K$")
+plt.xlabel("$K$ (# bootstraps)")
+plt.ylabel("$p_{weak}$")
+plt.legend()
+plt.tight_layout()
+
+Path("plots/png").mkdir(parents=True, exist_ok=True)
+plt.savefig("plots/01.svg")
+plt.savefig("plots/png/01.png", dpi=300)
+plt.close()

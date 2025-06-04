@@ -2,4 +2,5 @@ wandb
 videos
 outputs
 results
+plots/png
 *.zip
