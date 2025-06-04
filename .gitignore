@@ -1,3 +1,4 @@
-wandb/**
-videos/**
-outputs/**
+wandb
+videos
+outputs
+results
