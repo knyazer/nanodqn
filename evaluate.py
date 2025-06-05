@@ -7,24 +7,31 @@ from scipy.stats import binomtest
 import yaml
 
 
-def plot01():
-    root = Path("results/01")
-    files = sorted(root.glob("*.csv"))
+def plot04():
+    postfix = "04"
+    root = Path(f"results/{postfix}")
+    files = sorted(root.rglob("*.csv"))
 
     K, p, lo, hi = [], [], [], []
     base_p = base_lo = base_hi = None
+    means = {}
 
     for f in files:
         df = pd.read_csv(f)
         phat = df["weak_convergence"].mean()
         ci = binomtest(df["weak_convergence"].sum(), len(df)).proportion_ci(method="exact")
-        if "dqn" in f.stem and base_p is None:
+        if "_dqn" in str(f) and base_p is None:
             base_p, base_lo, base_hi = phat, ci.low, ci.high
-        elif "boot" in f.stem:
-            K.append(int(f.stem.split("boot")[1]))
+            means[1] = df["time_to_weak"].mean()
+        elif "_boot" in str(f):
+            k = int(str(f).split("boot")[1].split("_")[0][1:-1])
+            K.append(k)
             p.append(phat)
             lo.append(ci.low)
             hi.append(ci.high)
+            means[k] = df["time_to_weak"].mean()
+        else:
+            print(f"{f} is not a good path for plot04")
 
     if base_p is None:
         raise RuntimeError("no dqn baseline found")
@@ -41,9 +48,9 @@ def plot01():
     idx = np.argsort(K)
     K, p, lo, hi = K[idx], p[idx], lo[idx], hi[idx]
 
-    pred = 1 - (1.0 - base_p) ** K
+    pred = 1 - (1.0 - 0.007) ** K
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(12, 5))
 
     # linear plot
     axes[0].fill_between(K, lo, hi, alpha=0.3)
@@ -58,27 +65,23 @@ def plot01():
     axes[1].plot(K, p, "o-", label="empirical $1 - p_{weak}$")
     axes[1].plot(K, pred, "s--", label=r"$1 - (1 - p_{weak,dqn})^K$")
 
-    def forward_log_1m(x):
-        return np.where(x == 1, np.finfo(np.float16).min, np.log(1 - x))
-
-    def inverse_log_1m(x):
-        return 1 - np.exp(x)
-
-    axes[1].set_yscale("function", functions=(forward_log_1m, inverse_log_1m))
-
     axes[1].set_xlabel("$K$ (ensemble size)")
     axes[1].set_ylabel("Weak convergence log probability")
     axes[1].legend()
+    axes[1].set_yscale("log")
     axes[1].grid(True)
-    axes[1].set_ylim([0.5, 0.9995])
-    axes[1].yaxis.set_inverted(True)
-    axes[1].set_yticks([0.7, 0.85, 0.92, 0.96, 0.98, 0.99, 0.995, 0.9975, 0.999])
+
+    means_arr = []
+    for key in sorted(means.keys()):
+        means_arr.append(float(means[key]))
+    axes[2].plot(sorted(means.keys()), means_arr)
+    axes[2].grid(True)
 
     plt.tight_layout()
 
     Path("plots/png").mkdir(parents=True, exist_ok=True)
-    plt.savefig("plots/01.svg")
-    plt.savefig("plots/png/01.png", dpi=300)
+    plt.savefig(f"plots/{postfix}.svg")
+    plt.savefig(f"plots/png/{postfix}.png", dpi=300)
     plt.close()
 
 
@@ -165,4 +168,5 @@ def plot02():
 
 if __name__ == "__main__":
     # plot01()
-    plot02()
+    # plot02()
+    plot04()

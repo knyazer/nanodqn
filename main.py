@@ -55,6 +55,9 @@ class Model(eqx.Module):
             subkey, key = jr.split(key)
             layers.append(eqx.nn.Linear(inpsize, outsize, key=subkey))
 
+        for i in range(len(layers)):
+            layers[i] = eqx.tree_at(lambda l: l.bias, layers[i], jnp.zeros_like(layers[i].bias))
+
         self.layers = layers
 
     def __call__(self, x: Float[Array, "*"]) -> Float[Array, "act_size"]:  # noqa
@@ -226,6 +229,11 @@ class Config(eqx.Module):
     env_name: str = "DeepSea-bsuite"
     kind: str = "dqn"
     hardness: int = 24
+    randomize_actions: bool = True
+    num_episodes: int = 10_000
+
+    def autoseed(self):
+        return abs(hash(self)) % 1_000_000_000
 
     def __str__(self):
         return f"{self.kind}({self.ensemble_size})_{self.env_name}({self.hardness})"
@@ -246,7 +254,9 @@ def main(seed=0, cfg=Config(), debug=False):
     key = jr.key(seed)
     key, model_key, target_model_key, reset_key, loop_key, ikey = jr.split(key, 6)
 
-    env, env_params = gymnax.make(cfg.env_name, size=cfg.hardness)
+    env, env_params = gymnax.make(
+        cfg.env_name, size=cfg.hardness, randomize_actions=cfg.randomize_actions
+    )
     obs, state = jax.vmap(lambda k: env.reset(k, env_params))(jr.split(reset_key, cfg.num_envs))
     action_space = env.action_space(env_params)  # type: ignore
 
@@ -265,6 +275,7 @@ def main(seed=0, cfg=Config(), debug=False):
         action_space.sample(key),
         mask_size=rb_mask_size,
     )
+    key, _ = jr.split(key, 2)
 
     if cfg.kind == "boot":
         model = Bootstrapped(
@@ -299,6 +310,7 @@ def main(seed=0, cfg=Config(), debug=False):
             f"{cfg.kind} of the model is undefined, only allowed ['eps', 'boot', 'bootrp', 'dqn']"
         )
 
+    key, _ = jr.split(key, 2)
     optim = optax.adamw(cfg.lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
 
@@ -459,13 +471,14 @@ def main(seed=0, cfg=Config(), debug=False):
             ),
         )
 
+        key, _ = jr.split(key, 2)
         return model, rb, obs, state, model_indices, opt_state, key, rews, _log
 
     rews = np.zeros((cfg.num_envs,), dtype=np.float32)
-    # NOTE: I want to have exactly 5_000 episodes, not exactly "blah blah" steps!!
+    # NOTE: I want to have exactly "Y" episodes, not exactly "Z" steps!!
     # NOTE: each episode in deepsea takes exactly 'hardness' steps
     assert "DeepSea" in cfg.env_name, "you schedule episodes based on hardness"
-    num_steps = 5_000 * cfg.hardness // cfg.num_envs
+    num_steps = cfg.num_episodes * cfg.hardness // cfg.num_envs
 
     model_indices = jr.randint(ikey, (cfg.num_envs,), 0, cfg.ensemble_size)
 
@@ -502,29 +515,18 @@ def make_wandb_run_from_logs(cfg, logs):
     wandb.finish()
 
 
-max_trainings_in_parallel = 10
+max_trainings_in_parallel = 50
 
 
-def schedule_runs(N: int, cfg: Config, output_root: str = "results/03"):
+def schedule_runs(N: int, cfg: Config, output_root: str = "results/04"):
     VERSION = 1
     run_name_base = f"N={N}_{cfg.short_str()}"
     run_name = run_name_base
     folder_path = Path(output_root) / run_name
 
-    def _random_suffix(length: int = 4) -> str:
-        alphabet = "0123456789abcdef"
-        return "".join(random.choice(alphabet) for _ in range(length))
-
-    while folder_path.exists():
-        run_name = f"{run_name_base}_{_random_suffix()}"
-        folder_path = Path(output_root) / run_name
-    folder_path.mkdir(parents=True)
-
-    with open(folder_path / "config.yaml", "w") as f:
-        yaml.safe_dump(dataclasses.asdict(cfg), f)
-
-    with open(folder_path / ".version", "w") as f:
-        f.write(f"{VERSION}")
+    if folder_path.exists():
+        tqdm.write(f"{run_name} exists, thus skipping.")
+        return
 
     results = []
     thresh = 0.95
@@ -536,7 +538,7 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results/03"):
         pbar = tqdm(pbar)
     for i in pbar:
         _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg))(
-            jnp.arange(i, i + max_trainings_in_parallel)
+            jnp.arange(i, i + max_trainings_in_parallel) + cfg.autoseed()
         )
         for tr, m_indices in zip(logs["train_reward"], logs["model_indices"]):
             tr = np.array(tr)
@@ -566,18 +568,31 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results/03"):
             )
             tqdm.write(f"{results[-1]}")
 
-    pd.DataFrame(results).to_csv(folder_path / "results.csv", index=False)
+        if not folder_path.exists():
+            folder_path.mkdir(parents=True)
+            with open(folder_path / "config.yaml", "w") as f:
+                yaml.safe_dump(dataclasses.asdict(cfg), f)
+            with open(folder_path / ".version", "w") as f:
+                f.write(f"{VERSION}")
+        pd.DataFrame(results).to_csv(folder_path / "results.csv", index=False)
+
     return results
 
 
 if __name__ == "__main__":
+    """
     N = 50
     for hardness in tqdm(range(8, 51, 2)):
         schedule_runs(N, cfg=Config(kind="dqn", hardness=hardness))
         for ens_size in tqdm(range(2, 11, 2)):
             schedule_runs(N, cfg=Config(kind="boot", ensemble_size=ens_size, hardness=hardness))
+    """
+
+    N = 500
+    schedule_runs(N, Config(kind="dqn", hardness=12, ensemble_size=1, num_episodes=100_000))
+    schedule_runs(N, Config(kind="boot", hardness=12, ensemble_size=1))
 
     """
-    for ens_size in range(2, 11):
-        schedule_runs("boot", N=N, ensemble_size=ens_size)
+    for ens_size in range(2, 21, 2):
+        schedule_runs(N, Config(kind="boot", hardness=12, ensemble_size=ens_size))
     """
