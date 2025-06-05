@@ -462,7 +462,10 @@ def main(seed=0, cfg=Config(), debug=False):
         return model, rb, obs, state, model_indices, opt_state, key, rews, _log
 
     rews = np.zeros((cfg.num_envs,), dtype=np.float32)
-    num_steps = 100_000 // cfg.num_envs
+    # NOTE: I want to have exactly 5_000 episodes, not exactly "blah blah" steps!!
+    # NOTE: each episode in deepsea takes exactly 'hardness' steps
+    assert "DeepSea" in cfg.env_name, "you schedule episodes based on hardness"
+    num_steps = 5_000 * cfg.hardness // cfg.num_envs
 
     model_indices = jr.randint(ikey, (cfg.num_envs,), 0, cfg.ensemble_size)
 
@@ -502,7 +505,7 @@ def make_wandb_run_from_logs(cfg, logs):
 max_trainings_in_parallel = 10
 
 
-def schedule_runs(N: int, cfg: Config, output_root: str = "results"):
+def schedule_runs(N: int, cfg: Config, output_root: str = "results/03"):
     VERSION = 1
     run_name_base = f"N={N}_{cfg.short_str()}"
     run_name = run_name_base
@@ -568,7 +571,7 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results"):
 
 
 if __name__ == "__main__":
-    N = 10
+    N = 50
     for hardness in tqdm(range(8, 51, 2)):
         schedule_runs(N, cfg=Config(kind="dqn", hardness=hardness))
         for ens_size in tqdm(range(2, 11, 2)):

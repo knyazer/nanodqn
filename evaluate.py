@@ -1,48 +1,139 @@
 from pathlib import Path
 import pandas as pd
 import numpy as np
-from scipy.stats import binomtest
 import matplotlib.pyplot as plt
+import dataclasses
+from scipy.stats import binomtest
+import yaml
 
-root = Path("results/01")
-files = sorted(root.glob("*.csv"))
 
-K, p, lo, hi = [], [], [], []
-p_dqn = None
+def plot01():
+    root = Path("results/01")
+    files = sorted(root.glob("*.csv"))
 
-for f in files:
-    df = pd.read_csv(f)
-    k = df["weak_convergence"].sum()
-    n = len(df)
-    phat = k / n
-    ci = binomtest(k, n).proportion_ci(method="exact")
-    if "dqn" in f.stem:
-        p_dqn = phat  # baseline for theory curve
-    else:
-        K.append(int(f.stem.split("boot")[1]))
-        p.append(phat)
-        lo.append(ci.low)
-        hi.append(ci.high)
+    K, p, lo, hi = [], [], [], []
+    base_p = base_lo = base_hi = None
 
-if p_dqn is None:
-    raise RuntimeError("no dqn file found")
+    for f in files:
+        df = pd.read_csv(f)
+        phat = df["weak_convergence"].mean()
+        ci = binomtest(df["weak_convergence"].sum(), len(df)).proportion_ci(method="exact")
+        if "dqn" in f.stem and base_p is None:
+            base_p, base_lo, base_hi = phat, ci.low, ci.high
+        elif "boot" in f.stem:
+            K.append(int(f.stem.split("boot")[1]))
+            p.append(phat)
+            lo.append(ci.low)
+            hi.append(ci.high)
 
-K = np.array(K)
-p = np.array(p)
-lo = np.array(lo)
-hi = np.array(hi)
-pred = 1 - (1.0 - p_dqn) ** K
+    if base_p is None:
+        raise RuntimeError("no dqn baseline found")
 
-plt.figure()
-plt.fill_between(K, lo, hi, alpha=0.3)
-plt.plot(K, p, "o-", label="empirical $p_{weak}$")
-plt.plot(K, pred, "s--", label=r"$1-p_{weak,dqn}^K$")
-plt.xlabel("$K$ (# bootstraps)")
-plt.ylabel("$p_{weak}$")
-plt.legend()
-plt.tight_layout()
+    K.append(1)
+    p.append(base_p)
+    lo.append(base_lo)
+    hi.append(base_hi)
 
-Path("plots/png").mkdir(parents=True, exist_ok=True)
-plt.savefig("plots/01.svg")
-plt.savefig("plots/png/01.png", dpi=300)
-plt.close()
+    K = np.array(K)
+    p = np.array(p)
+    lo = np.array(lo)
+    hi = np.array(hi)
+    idx = np.argsort(K)
+    K, p, lo, hi = K[idx], p[idx], lo[idx], hi[idx]
+
+    pred = 1 - (1.0 - base_p) ** K
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+
+    # linear plot
+    axes[0].fill_between(K, lo, hi, alpha=0.3)
+    axes[0].plot(K, p, "o-", label="empirical $p_{weak}$")
+    axes[0].plot(K, pred, "s--", label=r"$1 - (1 - p_{weak,dqn})^K$")
+    axes[0].set_xlabel("$K$ (ensemble size)")
+    axes[0].set_ylabel("Weak convergence probability")
+    axes[0].legend()
+    axes[0].grid(True)
+
+    axes[1].fill_between(K, lo, hi, alpha=0.3)
+    axes[1].plot(K, p, "o-", label="empirical $1 - p_{weak}$")
+    axes[1].plot(K, pred, "s--", label=r"$1 - (1 - p_{weak,dqn})^K$")
+
+    def forward_log_1m(x):
+        return np.where(x == 1, np.finfo(np.float16).min, np.log(1 - x))
+
+    def inverse_log_1m(x):
+        return 1 - np.exp(x)
+
+    axes[1].set_yscale("function", functions=(forward_log_1m, inverse_log_1m))
+
+    axes[1].set_xlabel("$K$ (ensemble size)")
+    axes[1].set_ylabel("Weak convergence log probability")
+    axes[1].legend()
+    axes[1].grid(True)
+    axes[1].set_ylim([0.5, 0.9995])
+    axes[1].yaxis.set_inverted(True)
+    axes[1].set_yticks([0.7, 0.85, 0.92, 0.96, 0.98, 0.99, 0.995, 0.9975, 0.999])
+
+    plt.tight_layout()
+
+    Path("plots/png").mkdir(parents=True, exist_ok=True)
+    plt.savefig("plots/01.svg")
+    plt.savefig("plots/png/01.png", dpi=300)
+    plt.close()
+
+
+def load(path: str | Path):
+    folder = Path(path)
+    with open(folder / ".version") as f:
+        v = f.read().strip()
+    if v != "1":
+        raise ValueError(f"unsupported result log version {v}")
+    df = pd.read_csv(folder / "results.csv")
+    with open(folder / "config.yaml") as f:
+        cfg = yaml.safe_load(f)
+    fields = [(key, type(value), dataclasses.field(default=value)) for key, value in cfg.items()]
+    DynamicConfig = dataclasses.make_dataclass("DynamicConfig", fields)
+    cfg_instance = DynamicConfig(**cfg)
+    return df, cfg_instance
+
+
+def plot02():
+    root = Path("results/02")
+    paths = sorted(root.glob("*"))
+    loaded = [load(path) for path in paths]
+    agg = []
+    for df, cfg in loaded:
+        agg.append(
+            {
+                "mean_time_to_weak": df["time_to_weak"].mean(),
+                "max_time_to_weak": df["time_to_weak"].max(),
+                "mean_time_to_strong": df["time_to_strong"].mean(),
+                "ensemble_size": cfg.ensemble_size,
+                "hardness": cfg.hardness,
+                "kind": cfg.kind,
+            }
+        )
+    agg = pd.DataFrame(agg)
+    ensemble_sizes = sorted(agg["ensemble_size"].unique())
+    hardnesses = sorted(agg["hardness"].unique())
+
+    for ensemble_size in ensemble_sizes:
+        v = agg.query(f"ensemble_size == {ensemble_size} and kind == 'boot'")
+        sorted_by_hardness = v.set_index("hardness", drop=True).sort_index()
+        weak_arr = sorted_by_hardness["mean_time_to_weak"].array
+        # strong_arr = sorted_by_hardness["mean_time_to_strong"].array
+
+        # TODO: plot the weak_arr here, make sure to use good color palette
+    v = agg.query("kind == 'dqn'")
+    weak_arr = v.set_index("hardness", drop=True).sort_index()["mean_time_to_weak"].array
+    # TODO: plot the DQN here too with a distinct color
+    limit = agg["max_time_to_weak"].max()
+    # TOOD: also plot the limit as a dashed line
+    # set the appropriate limits, use grid, make a good plot overall!
+
+    breakpoint()
+
+
+if __name__ == "__main__":
+    # plot01()
+    plot02()
