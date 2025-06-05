@@ -117,21 +117,50 @@ def plot02():
     ensemble_sizes = sorted(agg["ensemble_size"].unique())
     hardnesses = sorted(agg["hardness"].unique())
 
-    for ensemble_size in ensemble_sizes:
+    plt.figure(figsize=(10, 6))
+    colors = plt.cm.viridis(np.linspace(0, 0.8, len(ensemble_sizes)))
+
+    for i, ensemble_size in enumerate(ensemble_sizes):
         v = agg.query(f"ensemble_size == {ensemble_size} and kind == 'boot'")
-        sorted_by_hardness = v.set_index("hardness", drop=True).sort_index()
-        weak_arr = sorted_by_hardness["mean_time_to_weak"].array
-        # strong_arr = sorted_by_hardness["mean_time_to_strong"].array
+        if len(v) > 0:
+            sorted_by_hardness = v.set_index("hardness", drop=True).sort_index()
+            weak_arr = sorted_by_hardness["mean_time_to_weak"].array
+            plt.plot(
+                hardnesses,
+                weak_arr,
+                "o-",
+                color=colors[i],
+                label=f"Bootstrap K={ensemble_size}",
+                linewidth=2,
+            )
 
-        # TODO: plot the weak_arr here, make sure to use good color palette
     v = agg.query("kind == 'dqn'")
-    weak_arr = v.set_index("hardness", drop=True).sort_index()["mean_time_to_weak"].array
-    # TODO: plot the DQN here too with a distinct color
-    limit = agg["max_time_to_weak"].max()
-    # TOOD: also plot the limit as a dashed line
-    # set the appropriate limits, use grid, make a good plot overall!
+    if len(v) > 0:
+        dqn_weak = v.set_index("hardness", drop=True).sort_index()["mean_time_to_weak"].array
+        plt.plot(
+            hardnesses,
+            dqn_weak,
+            "s--",
+            color="red",
+            label="DQN baseline",
+            linewidth=2,
+            markersize=8,
+        )
 
-    breakpoint()
+    limit = agg["max_time_to_weak"].max()
+    plt.axhline(y=limit, color="gray", linestyle=":", alpha=0.7, label=f"Max time limit ({limit})")
+
+    plt.xlabel("Environment Hardness")
+    plt.ylabel("Mean Time to Weak Convergence")
+    plt.title("Convergence Time vs Environment Hardness")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    Path("plots/png").mkdir(parents=True, exist_ok=True)
+    plt.savefig("plots/02.svg")
+    plt.savefig("plots/png/02.png", dpi=300)
+    plt.close()
 
 
 if __name__ == "__main__":
