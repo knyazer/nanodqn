@@ -1,22 +1,20 @@
-from os import wait
 import equinox as eqx
 import numpy as np
-from typing import List, Protocol, TypeVar, Any
 from jax import random as jr
 from jax import numpy as jnp
 import jax
 from jaxtyping import PRNGKeyArray, Float, Array
 import gymnax
-from replay_buffer import ReplayBuffer, ReplayBufferSample
+from replay_buffer import ReplayBuffer
 from tqdm import tqdm as tqdm
 import optax
 import wandb
 import os
 import pandas as pd
 import yaml
-import random
 import dataclasses
 from pathlib import Path
+from models import Model, ModelWithPrior, DQN, Bootstrapped, EpsilonGreedy
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 
@@ -24,200 +22,6 @@ jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
-
-
-DOUBLE_DQN = False
-
-T = TypeVar("T")
-
-
-class ModuleT(Protocol[T]):
-    def __call__(self, *args: Any, **kwargs: Any) -> T: ...
-
-
-class Model(eqx.Module):
-    layers: List[ModuleT]
-
-    def __init__(
-        self,
-        observation_size: int,
-        action_size: int,
-        /,
-        key: PRNGKeyArray,
-        layer_sizes=None,
-    ):
-        if layer_sizes is None:
-            layer_sizes = [24, 24]
-        layer_sizes = [observation_size, *layer_sizes, action_size]
-
-        layers = []
-        for inpsize, outsize in zip(layer_sizes[:-1], layer_sizes[1:]):
-            subkey, key = jr.split(key)
-            layers.append(eqx.nn.Linear(inpsize, outsize, key=subkey))
-
-        for i in range(len(layers)):
-            layers[i] = eqx.tree_at(lambda l: l.bias, layers[i], jnp.zeros_like(layers[i].bias))
-
-        self.layers = layers
-
-    def __call__(self, x: Float[Array, "*"]) -> Float[Array, "act_size"]:  # noqa
-        x = x.ravel()  # flatten
-        for layer in self.layers[:-1]:
-            x = jax.nn.gelu(layer(x))
-        x = self.layers[-1](x)
-        return x
-
-
-class ModelWithPrior(Model):
-    prior: Model
-    scale: Float[Array, ""]
-
-    def __init__(self, observation_size, action_size, /, scale, key, layer_sizes=None):
-        k1, k2 = jr.split(key)
-        super().__init__(observation_size, action_size, key=k1, layer_sizes=layer_sizes)
-
-        self.prior = Model(observation_size, action_size, key=k2, layer_sizes=layer_sizes)
-        self.scale = scale
-        # we interpret "scaling MLP by beta" by "scaling each parameter of MLP by beta"
-        # self.prior = jax.tree.map(
-        #    lambda node: node * self.scale if eqx.is_inexact_array(node) else node, self.prior
-        # )
-
-    def __call__(self, x):
-        return super().__call__(x) + jax.lax.stop_gradient(self.prior(x) * self.scale)
-
-
-gamma = 0.99
-
-
-class DQN(eqx.Module):
-    action_space: Any
-    model: Model
-    target_model: Model
-
-    def __init__(self, /, model_factory, action_space, key: PRNGKeyArray):
-        mkey, tkey = jr.split(key, 2)
-        self.model = model_factory(mkey)
-        self.target_model = model_factory(tkey)
-        self.action_space = action_space
-
-    def loss(self, key: PRNGKeyArray, sample):
-        rkey, key = jr.split(key)
-
-        target_model = self.target_model
-        model = self.model
-
-        # compute the 'target' q value (next step)
-        if DOUBLE_DQN:  # double dqn
-            best_action = model(sample.next_observations.squeeze()).argmax()
-            next_target_q_value = (target_model(sample.next_observations.squeeze()))[best_action]
-        else:
-            next_target_q_value = jnp.max(target_model(sample.next_observations.squeeze()))
-
-        next_q_value = jax.lax.stop_gradient(
-            sample.rewards + (1 - sample.dones) * gamma * next_target_q_value
-        ).squeeze()
-
-        # compute our model's prediction of the next value
-        q_pred = model(sample.observations.squeeze())
-        q_pred = q_pred[sample.actions]
-        return ((q_pred - next_q_value) ** 2).mean(), (q_pred, next_q_value)
-
-    def action(self, observation: Any, *args, **kwargs):
-        return self.model(observation).argmax()
-
-
-class AMCDQN(eqx.Module):
-    """
-    This class implements Adaptive MCMC DQN: sample a bunch of networks
-    from a hypernetwork, backprop them for a bit (and fill the buffer with
-    new transitions), and then do a single step on the VI model updating to the
-    new posterior. As of now, the VI model is a normal.
-
-
-    So, e.g. once every 20-ish steps of gradient descent, we do a single step on
-    the VI model, resample the self.model to get the new ones, update the self.target_model
-    to be the current self.model ones (the just-resampled ones) and then train for a bit again
-    """
-
-    ...
-
-
-class EpsilonGreedy(DQN):
-    def __init__(self, /, model_factory, action_space, key: PRNGKeyArray):
-        mkey, tkey = jr.split(key, 2)
-        self.model = model_factory(mkey)
-        self.target_model = model_factory(tkey)
-        self.action_space = action_space
-
-    def action(self, observation: Any, key: PRNGKeyArray, epsilon: Float[Array, ""], **kw):
-        choice_key, act_key = jr.split(key)
-        return jax.lax.cond(
-            jr.uniform(choice_key, ()) < epsilon,
-            lambda: jax.lax.stop_gradient(self.action_space.sample(act_key)),
-            lambda: self.model(observation).argmax(),
-        )
-
-
-class Bootstrapped(DQN):
-    action_space: Any
-    ensemble_size: int
-    model: Model  # this model is stacked node-wise
-    target_model: Model  # this too, each target is node-wise
-
-    def __init__(self, /, model_factory, ensemble_size, action_space, key: PRNGKeyArray):
-        tkey, mkey = jr.split(key)
-        keys = jr.split(mkey, ensemble_size)
-        models = [model_factory(mkey) for mkey in keys]
-
-        keys = jr.split(tkey, ensemble_size)
-        tmodels = [model_factory(tkey) for tkey in keys]
-
-        self.model = jax.tree.map(lambda *nodes: jnp.stack(nodes), *models, is_leaf=eqx.is_array)
-        self.target_model = jax.tree.map(
-            lambda *nodes: jnp.stack(nodes), *tmodels, is_leaf=eqx.is_array
-        )
-        self.ensemble_size = ensemble_size
-        self.action_space = action_space
-
-    def __getitem__(self, idx):
-        return jax.tree.map(lambda node: node[idx] if eqx.is_array(node) else node, self)
-
-    def __len__(self):
-        return self.ensemble_size
-
-    def loss(self, key: PRNGKeyArray, sample):
-        rkey, subkey, key = jr.split(key, 3)
-
-        # sample data from the buffer
-        model_index = jr.randint(subkey, (), 0, self.ensemble_size)
-        self = self[model_index]
-
-        target_model = self.target_model
-        model = self.model
-
-        # compute the 'target' q value (next step)
-        if DOUBLE_DQN:  # double dqn
-            best_action = model(sample.next_observations.squeeze()).argmax()
-            next_target_q_value = (target_model(sample.next_observations.squeeze()))[best_action]
-        else:
-            next_target_q_value = jnp.max(target_model(sample.next_observations.squeeze()))
-
-        next_q_value = jax.lax.stop_gradient(
-            sample.rewards + (1 - sample.dones) * gamma * next_target_q_value
-        ).squeeze()
-
-        # compute our model's prediction of the next value
-        q_pred = model(sample.observations.squeeze())
-        q_pred = q_pred[sample.actions]
-        return ((q_pred - next_q_value) ** 2).mean(), (q_pred, next_q_value)
-
-    def action(self, observation: Float[Array, "obs_size"], *_, index=None, **kws):
-        assert index is not None
-        single_model = jax.tree.map(
-            lambda node: node[index] if eqx.is_array(node) else node, self.model
-        )
-        return single_model(observation).argmax()
 
 
 class Config(eqx.Module):
@@ -231,12 +35,13 @@ class Config(eqx.Module):
     hardness: int = 24
     randomize_actions: bool = True
     num_episodes: int = 10_000
+    dqn_episodes_to_reset: int = 0
 
     def autoseed(self):
         return abs(hash(self)) % 1_000_000_000
 
     def __str__(self):
-        return f"{self.kind}({self.ensemble_size})_{self.env_name}({self.hardness})"
+        return f"{self.kind}({self.ensemble_size})_{self.env_name}({self.hardness})_beta{self.prior_scale}"
 
     def short_str(self):
         return str(self)
@@ -299,6 +104,9 @@ def main(seed=0, cfg=Config(), debug=False):
             model_factory=lambda k: Model(obs_size, act_size, key=k),
             key=model_key,
         )
+        raise RuntimeError(
+            "Btw, epsilon greedy is probably broken because progress handling depends on a nonlocal value captured by closure which is probably bad idk"
+        )
     elif cfg.kind == "dqn":
         model = DQN(
             action_space=action_space,
@@ -308,6 +116,14 @@ def main(seed=0, cfg=Config(), debug=False):
     else:
         raise TypeError(
             f"{cfg.kind} of the model is undefined, only allowed ['eps', 'boot', 'bootrp', 'dqn']"
+        )
+
+    def remake_model(key):
+        assert cfg.kind == "dqn"
+        return DQN(
+            action_space=action_space,
+            model_factory=lambda k: Model(obs_size, act_size, key=k),
+            key=key,
         )
 
     key, _ = jr.split(key, 2)
@@ -334,7 +150,7 @@ def main(seed=0, cfg=Config(), debug=False):
 
                 return jax.lax.cond(done, lambda: (key, obs, state, done, ret), env_step), None
 
-            final_carry, _ = jax.lax.scan(_step, init_carry, xs=None, length=hardness)
+            final_carry, _ = jax.lax.scan(_step, init_carry, xs=None, length=cfg.hardness)
             _, _, _, _, episode_return = final_carry
 
             return episode_return
@@ -426,8 +242,10 @@ def main(seed=0, cfg=Config(), debug=False):
     @eqx.filter_jit(donate="all")
     def inner_loop(model, rb, obs, state, model_indices, opt_state, key, rews, i):
         progress = jnp.clip(i / num_steps, 0.0, 1.0)
-        key, subkey, train_key = jr.split(key, 3)
+        key, subkey, train_key, remake_key = jr.split(key, 4)
         d_key = jr.split(subkey, cfg.num_envs)
+
+        # a single step in all the repeats of the environments
         model, rb, (obs, state), (dones, c_rewards) = step(
             model, rb, (obs, state), subkey, progress, model_indices
         )
@@ -444,10 +262,14 @@ def main(seed=0, cfg=Config(), debug=False):
         }
 
         def episode_done(rews, model_indices, j):
+            # in case an episode is completed we set the reward to an observed one,
+            # and choose a new member to be ran
             model_indices = model_indices.at[j].set(jr.randint(d_key[j], (), 0, cfg.ensemble_size))
             rews = rews.at[j].set(0)
             return rews, model_indices
 
+        # the following chooses new models and records rewards (for logging purposes)
+        # when episode is completed
         (rews, model_indices), _ = jax.lax.scan(
             lambda carry, j: (
                 jax.lax.cond(
@@ -461,6 +283,7 @@ def main(seed=0, cfg=Config(), debug=False):
             xs=jnp.arange(len(dones)),
         )
 
+        # synchronize the target model once in a while
         model = eqx.tree_at(
             lambda _m: _m.target_model,
             model,
@@ -471,6 +294,20 @@ def main(seed=0, cfg=Config(), debug=False):
             ),
         )
 
+        if cfg.kind == "dqn" and dqn_steps_to_reset != 0:
+            new_model = remake_model(remake_key)
+            do_reset = i % dqn_steps_to_reset == (dqn_steps_to_reset - 1)
+            model = eqx.tree_at(
+                lambda _m: _m.model,
+                model,
+                jax.lax.cond(do_reset, lambda: new_model.model, lambda: model.model),
+            )
+            model = eqx.tree_at(
+                lambda _m: _m.target_model,
+                model,
+                jax.lax.cond(do_reset, lambda: new_model.target_model, lambda: model.target_model),
+            )
+
         key, _ = jr.split(key, 2)
         return model, rb, obs, state, model_indices, opt_state, key, rews, _log
 
@@ -479,6 +316,7 @@ def main(seed=0, cfg=Config(), debug=False):
     # NOTE: each episode in deepsea takes exactly 'hardness' steps
     assert "DeepSea" in cfg.env_name, "you schedule episodes based on hardness"
     num_steps = cfg.num_episodes * cfg.hardness // cfg.num_envs
+    dqn_steps_to_reset = cfg.dqn_episodes_to_reset * cfg.hardness // cfg.num_envs
 
     model_indices = jr.randint(ikey, (cfg.num_envs,), 0, cfg.ensemble_size)
 
@@ -518,7 +356,8 @@ def make_wandb_run_from_logs(cfg, logs):
 max_trainings_in_parallel = 50
 
 
-def schedule_runs(N: int, cfg: Config, output_root: str = "results/04"):
+def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
+    # This function just reports results in a nice format
     VERSION = 1
     run_name_base = f"N={N}_{cfg.short_str()}"
     run_name = run_name_base
@@ -537,6 +376,7 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results/04"):
     if N >= max_trainings_in_parallel * 5:
         pbar = tqdm(pbar)
     for i in pbar:
+        # next line does the actual training with given seeds
         _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg))(
             jnp.arange(i, i + max_trainings_in_parallel) + cfg.autoseed()
         )
@@ -580,19 +420,33 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results/04"):
 
 
 if __name__ == "__main__":
+    N = 50
+    schedule_runs(
+        N,
+        cfg=Config(kind="dqn", dqn_episodes_to_reset=10_000, num_episodes=100_000, ensemble_size=1),
+    )
+
     """
     N = 50
     for hardness in tqdm(range(8, 51, 2)):
         schedule_runs(N, cfg=Config(kind="dqn", hardness=hardness))
         for ens_size in tqdm(range(2, 11, 2)):
             schedule_runs(N, cfg=Config(kind="boot", ensemble_size=ens_size, hardness=hardness))
-    """
+    N = 50
+    schedule_runs(
+        N, Config(kind="bootrp", hardness=12, ensemble_size=10, num_episodes=50_000, prior_scale=1)
+    )
+    schedule_runs(
+        N, Config(kind="bootrp", hardness=12, ensemble_size=10, num_episodes=50_000, prior_scale=3)
+    )
+    schedule_runs(
+        N, Config(kind="bootrp", hardness=12, ensemble_size=10, num_episodes=50_000, prior_scale=10)
+    )
+    schedule_runs(
+        N, Config(kind="bootrp", hardness=12, ensemble_size=10, num_episodes=50_000, prior_scale=50)
+    )
+    schedule_runs(N, Config(kind="boot", hardness=12, ensemble_size=10, num_episodes=50_000))
 
-    N = 500
-    schedule_runs(N, Config(kind="dqn", hardness=12, ensemble_size=1, num_episodes=100_000))
-    schedule_runs(N, Config(kind="boot", hardness=12, ensemble_size=1))
-
-    """
     for ens_size in range(2, 21, 2):
         schedule_runs(N, Config(kind="boot", hardness=12, ensemble_size=ens_size))
     """

@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import dataclasses
 from scipy.stats import binomtest
 import yaml
+from models
 
 
 def plot04():
