@@ -14,7 +14,7 @@ import pandas as pd
 import yaml
 import dataclasses
 from pathlib import Path
-from models import Model, ModelWithPrior, DQN, Bootstrapped, EpsilonGreedy
+from models import Model, ModelWithPrior, DQN, Bootstrapped, EpsilonGreedy, AMCDQN, filtered_cond
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 
@@ -73,7 +73,7 @@ def main(seed=0, cfg=Config(), debug=False):
     single_obs = obs[0]
     obs_size = single_obs.size
 
-    rb_mask_size = cfg.ensemble_size if "boot" in cfg.kind else 1
+    rb_mask_size = cfg.ensemble_size if ("boot" in cfg.kind or cfg.kind == "amc") else 1
 
     rb = ReplayBuffer.make(
         10_000,
@@ -114,9 +114,16 @@ def main(seed=0, cfg=Config(), debug=False):
             model_factory=lambda k: Model(obs_size, act_size, key=k),
             key=model_key,
         )
+    elif cfg.kind == "amc":
+        model = AMCDQN(
+            action_space=action_space,
+            model_factory=lambda k: Model(obs_size, act_size, key=k),
+            ensemble_size=cfg.ensemble_size,
+            key=model_key,
+        )
     else:
         raise TypeError(
-            f"{cfg.kind} of the model is undefined, only allowed ['eps', 'boot', 'bootrp', 'dqn']"
+            f"{cfg.kind} of the model is undefined, only allowed ['eps', 'boot', 'bootrp', 'dqn', 'amc']"
         )
 
     key, _ = jr.split(key, 2)
@@ -244,15 +251,23 @@ def main(seed=0, cfg=Config(), debug=False):
         )
 
         # synchronize the target model once in a while
-        model = eqx.tree_at(
-            lambda _m: _m.target_model,
-            model,
-            jax.lax.cond(
+        if cfg.kind == "amc":
+            model = filtered_cond(
                 i % (500 // cfg.num_envs) == (500 // cfg.num_envs - 1),
-                lambda: model.model,
-                lambda: model.target_model,
-            ),
-        )
+                lambda: model.vi_update(remake_key),
+                lambda: model,
+            )
+        else:
+            # Regular target update for other methods
+            model = eqx.tree_at(
+                lambda _m: _m.target_model,
+                model,
+                jax.lax.cond(
+                    i % (500 // cfg.num_envs) == (500 // cfg.num_envs - 1),
+                    lambda: model.model,
+                    lambda: model.target_model,
+                ),
+            )
 
         key, _ = jr.split(key, 2)
         return model, rb, obs, state, model_indices, opt_state, key, rews, _log
