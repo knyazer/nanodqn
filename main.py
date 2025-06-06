@@ -23,6 +23,8 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
+max_trainings_in_parallel = 10
+
 
 class Config(eqx.Module):
     batch_size: int = 128
@@ -35,7 +37,6 @@ class Config(eqx.Module):
     hardness: int = 24
     randomize_actions: bool = True
     num_episodes: int = 10_000
-    dqn_episodes_to_reset: int = 0
 
     def autoseed(self):
         return abs(hash(self)) % 1_000_000_000
@@ -118,48 +119,9 @@ def main(seed=0, cfg=Config(), debug=False):
             f"{cfg.kind} of the model is undefined, only allowed ['eps', 'boot', 'bootrp', 'dqn']"
         )
 
-    def remake_model(key):
-        assert cfg.kind == "dqn"
-        return DQN(
-            action_space=action_space,
-            model_factory=lambda k: Model(obs_size, act_size, key=k),
-            key=key,
-        )
-
     key, _ = jr.split(key, 2)
     optim = optax.adamw(cfg.lr)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
-
-    @eqx.filter_jit
-    def eval_model(model, key):
-        @eqx.filter_jit
-        def eval_run(model, key):
-            key, reset_key, ikey = jr.split(key, 3)
-            obs, state = env.reset(reset_key, env_params)
-            init_carry = (key, obs, state, False, jnp.zeros(()))
-            index = jr.randint(ikey, (), 0, cfg.ensemble_size)
-
-            def _step(carry, _):
-                key, obs, state, done, ret = carry
-                key, act_key, step_key = jr.split(key, 3)
-
-                def env_step():
-                    action = model.action(obs, act_key, epsilon=0.0, index=index)
-                    obs2, state2, reward, done2, _ = env.step(step_key, state, action, env_params)
-                    return (key, obs2, state2, done2, ret + reward)
-
-                return jax.lax.cond(done, lambda: (key, obs, state, done, ret), env_step), None
-
-            final_carry, _ = jax.lax.scan(_step, init_carry, xs=None, length=cfg.hardness)
-            _, _, _, _, episode_return = final_carry
-
-            return episode_return
-
-        key, eval_key = jr.split(key)
-        eval_rewards = eqx.filter_vmap(lambda k: eval_run(model, k))(
-            jr.split(eval_key, cfg.batch_size * 4)
-        )
-        return eval_rewards.mean()
 
     @eqx.filter_jit(donate="all-except-first")
     def train(rb, model, opt_state, key):
@@ -191,10 +153,8 @@ def main(seed=0, cfg=Config(), debug=False):
         n_obs, state, reward, done, _, action = eqx.filter_vmap(unbatched_step)(
             jr.split(step_key, cfg.num_envs), state, obs, model_indices
         )
-        # Note that the following does not follow the RP nor BS paper, but
-        # instead is more intuitive: we add the transitions only to our "own"
-        # buffers
 
+        # NOTE: The mask does not do anything as of now: this is fine, follows p=1
         rb = rb.add(
             obs,
             n_obs,
@@ -294,20 +254,6 @@ def main(seed=0, cfg=Config(), debug=False):
             ),
         )
 
-        if cfg.kind == "dqn" and dqn_steps_to_reset != 0:
-            new_model = remake_model(remake_key)
-            do_reset = i % dqn_steps_to_reset == (dqn_steps_to_reset - 1)
-            model = eqx.tree_at(
-                lambda _m: _m.model,
-                model,
-                jax.lax.cond(do_reset, lambda: new_model.model, lambda: model.model),
-            )
-            model = eqx.tree_at(
-                lambda _m: _m.target_model,
-                model,
-                jax.lax.cond(do_reset, lambda: new_model.target_model, lambda: model.target_model),
-            )
-
         key, _ = jr.split(key, 2)
         return model, rb, obs, state, model_indices, opt_state, key, rews, _log
 
@@ -316,7 +262,6 @@ def main(seed=0, cfg=Config(), debug=False):
     # NOTE: each episode in deepsea takes exactly 'hardness' steps
     assert "DeepSea" in cfg.env_name, "you schedule episodes based on hardness"
     num_steps = cfg.num_episodes * cfg.hardness // cfg.num_envs
-    dqn_steps_to_reset = cfg.dqn_episodes_to_reset * cfg.hardness // cfg.num_envs
 
     model_indices = jr.randint(ikey, (cfg.num_envs,), 0, cfg.ensemble_size)
 
@@ -338,22 +283,6 @@ def main(seed=0, cfg=Config(), debug=False):
     model, rb, obs, state, model_indices, opt_state, key, rews = eqx.combine(carry_dyn, carry_st)
 
     return model, logs
-
-
-def make_wandb_run_from_logs(cfg, logs):
-    wandb.init(name=str(cfg), group=str(cfg), save_code=True)
-    for j in range(len(logs[list(logs.keys())[0]])):
-        _log = {}
-        for k in logs:
-            _log[k] = logs[k][j]
-        if _log["train_reward"] == jnp.nan:
-            del _log["train_reward"]
-        wandb.log({**_log})
-
-    wandb.finish()
-
-
-max_trainings_in_parallel = 50
 
 
 def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
@@ -420,33 +349,10 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
 
 
 if __name__ == "__main__":
+    experiment = "07"
     N = 50
     schedule_runs(
         N,
-        cfg=Config(kind="dqn", dqn_episodes_to_reset=10_000, num_episodes=100_000, ensemble_size=1),
+        cfg=Config(kind="dqn", num_episodes=100_000, ensemble_size=1),
+        output_root=f"results/{experiment}",
     )
-
-    """
-    N = 50
-    for hardness in tqdm(range(8, 51, 2)):
-        schedule_runs(N, cfg=Config(kind="dqn", hardness=hardness))
-        for ens_size in tqdm(range(2, 11, 2)):
-            schedule_runs(N, cfg=Config(kind="boot", ensemble_size=ens_size, hardness=hardness))
-    N = 50
-    schedule_runs(
-        N, Config(kind="bootrp", hardness=12, ensemble_size=10, num_episodes=50_000, prior_scale=1)
-    )
-    schedule_runs(
-        N, Config(kind="bootrp", hardness=12, ensemble_size=10, num_episodes=50_000, prior_scale=3)
-    )
-    schedule_runs(
-        N, Config(kind="bootrp", hardness=12, ensemble_size=10, num_episodes=50_000, prior_scale=10)
-    )
-    schedule_runs(
-        N, Config(kind="bootrp", hardness=12, ensemble_size=10, num_episodes=50_000, prior_scale=50)
-    )
-    schedule_runs(N, Config(kind="boot", hardness=12, ensemble_size=10, num_episodes=50_000))
-
-    for ens_size in range(2, 21, 2):
-        schedule_runs(N, Config(kind="boot", hardness=12, ensemble_size=ens_size))
-    """
