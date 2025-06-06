@@ -287,7 +287,7 @@ def main(seed=0, cfg=Config(), debug=False):
 
 def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
     # This function just reports results in a nice format
-    VERSION = 1
+    VERSION = 2
     run_name_base = f"N={N}_{cfg.short_str()}"
     run_name = run_name_base
     folder_path = Path(output_root) / run_name
