@@ -353,7 +353,7 @@ def make_wandb_run_from_logs(cfg, logs):
     wandb.finish()
 
 
-max_trainings_in_parallel = 50
+max_trainings_in_parallel = 20
 
 
 def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
@@ -420,10 +420,29 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
 
 
 if __name__ == "__main__":
-    N = 50
+    N = 20
+    experiment = "08"
     schedule_runs(
         N,
-        cfg=Config(kind="dqn", dqn_episodes_to_reset=10_000, num_episodes=100_000, ensemble_size=1),
+        cfg=Config(
+            kind="dqn",
+            dqn_episodes_to_reset=10_000,
+            num_episodes=100_000,
+            ensemble_size=1,
+            hardness=12,
+        ),
+        output_root=f"results/{experiment}",
+    )
+
+    schedule_runs(
+        N,
+        cfg=Config(
+            kind="boot",
+            num_episodes=10_000,
+            ensemble_size=10,
+            hardness=12,
+        ),
+        output_root=f"results/{experiment}",
     )
 
     """
