@@ -239,14 +239,9 @@ class AMCDQN(eqx.Module):
 
         new_vi_mean, new_vi_logvar = compute_mle_params(self.model)
         new_vi_logvar = jax.tree.map(
-            lambda x: jnp.clip(x, -10, 0) if eqx.is_inexact_array(x) else x,
+            lambda x: jnp.clip(x, -5, 0) if eqx.is_inexact_array(x) else x,
             new_vi_logvar,
             is_leaf=eqx.is_inexact_array,
-        )
-        jax.debug.print(
-            "{}+-{}",
-            new_vi_mean.layers[1].weight[0, 3:4],
-            jnp.exp(new_vi_logvar.layers[1].weight[0, 3:4]),
         )
 
         self = eqx.tree_at(lambda s: s.vi_mean, self, new_vi_mean)
@@ -256,10 +251,9 @@ class AMCDQN(eqx.Module):
             eqx.Partial(sample_new_model, mean=new_vi_mean, logvar=new_vi_logvar)
         )
         new_models = partial(jr.split(model_key, self.ensemble_size))
-        new_target_models = partial(jr.split(target_key, self.ensemble_size))
 
         self = eqx.tree_at(lambda s: s.model, self, new_models)
-        self = eqx.tree_at(lambda s: s.target_model, self, self.model)
+        self = eqx.tree_at(lambda s: s.target_model, self, new_models)
 
         return self
 

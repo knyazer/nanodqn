@@ -365,7 +365,7 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
 
 if __name__ == "__main__":
     experiment = "07"
-    N = 10
+    N = 50
     schedule_runs(
         N,
         cfg=Config(kind="amc", num_episodes=10_000, ensemble_size=10),
