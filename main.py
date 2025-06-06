@@ -34,7 +34,7 @@ class Config(eqx.Module):
     prior_scale: float = 3
     env_name: str = "DeepSea-bsuite"
     kind: str = "dqn"
-    hardness: int = 24
+    hardness: int = 12
     randomize_actions: bool = True
     num_episodes: int = 10_000
 
@@ -365,9 +365,14 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
 
 if __name__ == "__main__":
     experiment = "07"
-    N = 50
+    N = 10
     schedule_runs(
         N,
-        cfg=Config(kind="dqn", num_episodes=100_000, ensemble_size=1),
+        cfg=Config(kind="amc", num_episodes=10_000, ensemble_size=10),
+        output_root=f"results/{experiment}",
+    )
+    schedule_runs(
+        N,
+        cfg=Config(kind="boot", num_episodes=10_000, ensemble_size=10),
         output_root=f"results/{experiment}",
     )
