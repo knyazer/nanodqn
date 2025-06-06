@@ -325,6 +325,13 @@ def main(key=None, cfg=Config(), debug=False):
                 model,
                 jax.lax.cond(do_reset, lambda: new_model.target_model, lambda: model.target_model),
             )
+            """
+            opt_state = jax.lax.cond(
+                do_reset,
+                lambda: optim.init(eqx.filter(model, eqx.is_inexact_array)),
+                lambda: opt_state,
+            )
+            """
 
         key, _ = jr.split(key, 2)
         return model, rb, obs, state, model_indices, opt_state, key, rews, _log
