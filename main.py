@@ -13,6 +13,8 @@ import os
 import pandas as pd
 import yaml
 import dataclasses
+import json
+import hashlib
 from pathlib import Path
 from models import Model, ModelWithPrior, DQN, Bootstrapped, EpsilonGreedy
 
@@ -38,7 +40,10 @@ class Config(eqx.Module):
     dqn_episodes_to_reset: int = 0
 
     def autoseed(self):
-        return abs(hash(self)) % 1_000_000_000
+        cfg_dict = dataclasses.asdict(self)
+        cfg_str = json.dumps(cfg_dict, sort_keys=True)
+        h = hashlib.sha256(cfg_str.encode()).hexdigest()
+        return int(h[:6], 16)
 
     def __str__(self):
         return f"{self.kind}({self.ensemble_size})_{self.env_name}({self.hardness})_beta{self.prior_scale}"
@@ -48,7 +53,7 @@ class Config(eqx.Module):
 
 
 @eqx.filter_jit
-def main(seed=0, cfg=Config(), debug=False):
+def main(key=None, cfg=Config(), debug=False):
     if debug:
         jax.debug.print(
             "Main is running with: kind={}, ensemble_size={}, hardness={}",
@@ -56,7 +61,6 @@ def main(seed=0, cfg=Config(), debug=False):
             cfg.ensemble_size,
             cfg.hardness,
         )
-    key = jr.key(seed)
     key, model_key, target_model_key, reset_key, loop_key, ikey = jr.split(key, 6)
 
     env, env_params = gymnax.make(
@@ -294,9 +298,23 @@ def main(seed=0, cfg=Config(), debug=False):
             ),
         )
 
+        ind = [3, 4]
+        while len(ind) != len(model.model.layers[1].weight.shape):
+            ind = [0] + ind
+        ind = tuple(ind)
         if cfg.kind == "dqn" and dqn_steps_to_reset != 0:
             new_model = remake_model(remake_key)
             do_reset = i % dqn_steps_to_reset == (dqn_steps_to_reset - 1)
+            if debug:
+                jax.lax.cond(
+                    do_reset,
+                    lambda: jax.debug.print(
+                        "Model reinitialized {} {}",
+                        model.model.layers[1].weight[3, 4],
+                        new_model.model.layers[1].weight[3, 4],
+                    ),
+                    lambda: None,
+                )
             model = eqx.tree_at(
                 lambda _m: _m.model,
                 model,
@@ -356,7 +374,9 @@ def make_wandb_run_from_logs(cfg, logs):
 max_trainings_in_parallel = 20
 
 
-def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
+def schedule_runs(
+    N: int, cfg: Config, output_root: str, concurrent: int = max_trainings_in_parallel
+):
     # This function just reports results in a nice format
     VERSION = 1
     run_name_base = f"N={N}_{cfg.short_str()}"
@@ -372,14 +392,16 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
 
     tqdm.write(f"Starting the run scheduler with {cfg.short_str()}, N={N}")
 
-    pbar = range(0, N, max_trainings_in_parallel)
-    if N >= max_trainings_in_parallel * 5:
+    starting_seed = cfg.autoseed()
+    keys = jr.split(jr.key(starting_seed), N)
+    tqdm.write(f"Scheduler using seed: {starting_seed}")
+
+    pbar = range(0, N, concurrent)
+    if N >= concurrent * 5:
         pbar = tqdm(pbar)
-    for i in pbar:
+    for _i in pbar:
         # next line does the actual training with given seeds
-        _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg))(
-            jnp.arange(i, i + max_trainings_in_parallel) + cfg.autoseed()
-        )
+        _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg))(keys[_i : _i + concurrent])
         for tr, m_indices in zip(logs["train_reward"], logs["model_indices"]):
             tr = np.array(tr)
             mask = np.logical_not(np.isnan(tr))
@@ -420,8 +442,18 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
 
 
 if __name__ == "__main__":
-    N = 20
+    N = 200
     experiment = "08"
+    schedule_runs(
+        N,
+        cfg=Config(
+            kind="boot",
+            num_episodes=10_000,
+            ensemble_size=10,
+            hardness=12,
+        ),
+        output_root=f"results/{experiment}",
+    )
     schedule_runs(
         N,
         cfg=Config(
@@ -433,39 +465,14 @@ if __name__ == "__main__":
         ),
         output_root=f"results/{experiment}",
     )
-
     schedule_runs(
-        N,
+        N * 10,
         cfg=Config(
-            kind="boot",
+            kind="dqn",
+            dqn_episodes_to_reset=0,
             num_episodes=10_000,
-            ensemble_size=10,
+            ensemble_size=1,
             hardness=12,
         ),
         output_root=f"results/{experiment}",
     )
-
-    """
-    N = 50
-    for hardness in tqdm(range(8, 51, 2)):
-        schedule_runs(N, cfg=Config(kind="dqn", hardness=hardness))
-        for ens_size in tqdm(range(2, 11, 2)):
-            schedule_runs(N, cfg=Config(kind="boot", ensemble_size=ens_size, hardness=hardness))
-    N = 50
-    schedule_runs(
-        N, Config(kind="bootrp", hardness=12, ensemble_size=10, num_episodes=50_000, prior_scale=1)
-    )
-    schedule_runs(
-        N, Config(kind="bootrp", hardness=12, ensemble_size=10, num_episodes=50_000, prior_scale=3)
-    )
-    schedule_runs(
-        N, Config(kind="bootrp", hardness=12, ensemble_size=10, num_episodes=50_000, prior_scale=10)
-    )
-    schedule_runs(
-        N, Config(kind="bootrp", hardness=12, ensemble_size=10, num_episodes=50_000, prior_scale=50)
-    )
-    schedule_runs(N, Config(kind="boot", hardness=12, ensemble_size=10, num_episodes=50_000))
-
-    for ens_size in range(2, 21, 2):
-        schedule_runs(N, Config(kind="boot", hardness=12, ensemble_size=ens_size))
-    """
