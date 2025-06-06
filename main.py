@@ -13,6 +13,8 @@ import os
 import pandas as pd
 import yaml
 import dataclasses
+import hashlib
+import json
 from pathlib import Path
 from models import Model, ModelWithPrior, DQN, Bootstrapped, EpsilonGreedy, AMCDQN, filtered_cond
 
@@ -23,7 +25,7 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
-max_trainings_in_parallel = 10
+max_trainings_in_parallel = 20
 
 
 class Config(eqx.Module):
@@ -37,9 +39,13 @@ class Config(eqx.Module):
     hardness: int = 12
     randomize_actions: bool = True
     num_episodes: int = 10_000
+    dqn_episodes_to_reset: int = 0
 
     def autoseed(self):
-        return abs(hash(self)) % 1_000_000_000
+        cfg_dict = dataclasses.asdict(self)
+        cfg_str = json.dumps(cfg_dict, sort_keys=True)
+        h = hashlib.sha256(cfg_str.encode()).hexdigest()
+        return int(h[:6], 16)
 
     def __str__(self):
         return f"{self.kind}({self.ensemble_size})_{self.env_name}({self.hardness})_beta{self.prior_scale}"
@@ -49,7 +55,7 @@ class Config(eqx.Module):
 
 
 @eqx.filter_jit
-def main(seed=0, cfg=Config(), debug=False):
+def main(key=None, cfg=Config(), debug=False):
     if debug:
         jax.debug.print(
             "Main is running with: kind={}, ensemble_size={}, hardness={}",
@@ -57,7 +63,6 @@ def main(seed=0, cfg=Config(), debug=False):
             cfg.ensemble_size,
             cfg.hardness,
         )
-    key = jr.key(seed)
     key, model_key, target_model_key, reset_key, loop_key, ikey = jr.split(key, 6)
 
     env, env_params = gymnax.make(
@@ -300,15 +305,16 @@ def main(seed=0, cfg=Config(), debug=False):
     return model, logs
 
 
-def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
+def schedule_runs(
+    N: int, cfg: Config, output_root: str, concurrent: int = max_trainings_in_parallel
+):
     # This function just reports results in a nice format
-    VERSION = 2
+    VERSION = 1
     run_name_base = f"N={N}_{cfg.short_str()}"
     run_name = run_name_base
     folder_path = Path(output_root) / run_name
 
     if folder_path.exists():
-        tqdm.write(f"{run_name} exists, thus skipping.")
         return
 
     results = []
@@ -316,14 +322,17 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
 
     tqdm.write(f"Starting the run scheduler with {cfg.short_str()}, N={N}")
 
-    pbar = range(0, N, max_trainings_in_parallel)
-    if N >= max_trainings_in_parallel * 5:
+    starting_seed = cfg.autoseed()
+    keys = jr.split(jr.key(starting_seed), N)
+    tqdm.write(f"Scheduler using seed: {starting_seed}")
+
+    concurrent = min(N, concurrent)
+    pbar = range(0, N, concurrent)
+    if N >= concurrent * 5:
         pbar = tqdm(pbar)
-    for i in pbar:
+    for _i in pbar:
         # next line does the actual training with given seeds
-        _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg))(
-            jnp.arange(i, i + max_trainings_in_parallel) + cfg.autoseed()
-        )
+        _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg))(keys[_i : _i + concurrent])
         for tr, m_indices in zip(logs["train_reward"], logs["model_indices"]):
             tr = np.array(tr)
             mask = np.logical_not(np.isnan(tr))
@@ -364,15 +373,18 @@ def schedule_runs(N: int, cfg: Config, output_root: str = "results/06"):
 
 
 if __name__ == "__main__":
-    experiment = "07"
-    N = 50
+    experiment = "12"
+    hardness = 16
+    N = 100
     schedule_runs(
         N,
-        cfg=Config(kind="amc", num_episodes=10_000, ensemble_size=10),
+        cfg=Config(kind="amc", num_episodes=10_000, ensemble_size=10, hardness=hardness),
         output_root=f"results/{experiment}",
     )
+    """
     schedule_runs(
         N,
-        cfg=Config(kind="boot", num_episodes=10_000, ensemble_size=10),
+        cfg=Config(kind="boot", num_episodes=10_000, ensemble_size=10, hardness=hardness),
         output_root=f"results/{experiment}",
     )
+    """

@@ -214,7 +214,7 @@ class AMCDQN(eqx.Module):
                 # Compute empirical mean and variance across ensemble
                 if eqx.is_inexact_array(node):
                     mean = jnp.mean(node, axis=0)
-                    var = jnp.var(node, axis=0) + 1e-6  # small regularization
+                    var = jnp.var(node, axis=0) + 1e-3
                     logvar = jnp.log(var)
                     return mean, logvar
                 else:
@@ -239,7 +239,7 @@ class AMCDQN(eqx.Module):
 
         new_vi_mean, new_vi_logvar = compute_mle_params(self.model)
         new_vi_logvar = jax.tree.map(
-            lambda x: jnp.clip(x, -5, 0) if eqx.is_inexact_array(x) else x,
+            lambda x: jnp.clip(x, -4, 0) if eqx.is_inexact_array(x) else x,
             new_vi_logvar,
             is_leaf=eqx.is_inexact_array,
         )

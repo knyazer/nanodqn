@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 import dataclasses
 from scipy.stats import binomtest
 import yaml
-from models
 
 
 def plot04():
@@ -101,8 +100,8 @@ def load(path: str | Path):
     return df, cfg_instance
 
 
-def plot02():
-    root = Path("results/02")
+def make_agg(version):
+    root = Path(f"results/{version}")
     paths = sorted(root.glob("*"))
     loaded = [load(path) for path in paths]
     agg = []
@@ -112,11 +111,18 @@ def plot02():
                 "mean_time_to_weak": df["time_to_weak"].mean(),
                 "max_time_to_weak": df["time_to_weak"].max(),
                 "mean_time_to_strong": df["time_to_strong"].mean(),
+                "weak_convergence": (df["time_to_weak"] != df["time_to_weak"].max()).sum()
+                / len(df),
                 "ensemble_size": cfg.ensemble_size,
                 "hardness": cfg.hardness,
                 "kind": cfg.kind,
             }
         )
+    return pd.DataFrame(agg)
+
+
+def plot02():
+    agg = make_agg("02")
     agg = pd.DataFrame(agg)
     ensemble_sizes = sorted(agg["ensemble_size"].unique())
     hardnesses = sorted(agg["hardness"].unique())
@@ -170,4 +176,6 @@ def plot02():
 if __name__ == "__main__":
     # plot01()
     # plot02()
-    plot04()
+    # plot04()
+    agg = make_agg("11")
+    print(agg)
