@@ -60,14 +60,14 @@ class Model(eqx.Module):
 
 class ModelWithPrior(Model):
     prior: Model
-    scale: Float[Array, ""]
+    scale: float
 
     def __init__(self, observation_size, action_size, /, scale, key, layer_sizes=None):
         k1, k2 = jr.split(key)
         super().__init__(observation_size, action_size, key=k1, layer_sizes=layer_sizes)
 
         self.prior = Model(observation_size, action_size, key=k2, layer_sizes=layer_sizes)
-        self.scale = scale
+        self.scale = float(scale)
 
     def __call__(self, x):
         return super().__call__(x) + jax.lax.stop_gradient(self.prior(x) * self.scale)
@@ -130,44 +130,25 @@ class AMCDQN(eqx.Module):
     ensemble_size: int
     model: Model  # ensemble of models (like Bootstrapped)
     target_model: Model  # ensemble of target models
-    vi_mean: Model  # variational mean parameters
-    vi_logvar: Model  # variational log variance parameters
 
     def __init__(self, /, model_factory, ensemble_size, action_space, key: PRNGKeyArray):
         self.action_space = action_space
         self.ensemble_size = ensemble_size
 
-        # Initialize variational parameters
         vi_key, sample_key = jr.split(key)
-        self.vi_mean = model_factory(vi_key)
-        self.vi_logvar = jax.tree.map(lambda x: jnp.full_like(x, -2.0), self.vi_mean)
 
         # Sample initial ensemble from VI distribution
         sample_keys = jr.split(sample_key, ensemble_size * 2)
         model_keys, target_keys = sample_keys[:ensemble_size], sample_keys[ensemble_size:]
 
-        models = [self._sample_from_vi(k) for k in model_keys]
-        target_models = [self._sample_from_vi(k) for k in target_keys]
+        models = [model_factory(k) for k in model_keys]
+        target_models = [model_factory(k) for k in target_keys]
 
         # Stack like in Bootstrapped
         self.model = jax.tree.map(lambda *nodes: jnp.stack(nodes), *models, is_leaf=eqx.is_array)
         self.target_model = jax.tree.map(
             lambda *nodes: jnp.stack(nodes), *target_models, is_leaf=eqx.is_array
         )
-
-    def _sample_from_vi(self, key: PRNGKeyArray):
-        """Sample a single model from variational distribution"""
-        keys = jr.split(key, len(jax.tree_leaves(self.vi_mean)))
-        key_iter = iter(keys)
-
-        def sample_param(mean, logvar):
-            if eqx.is_inexact_array(mean):
-                std = jnp.exp(0.5 * logvar)
-                return mean + std * jr.normal(next(key_iter), mean.shape)
-            else:
-                return mean
-
-        return jax.tree.map(sample_param, self.vi_mean, self.vi_logvar)
 
     def __getitem__(self, idx):
         return jax.tree.map(lambda node: node[idx] if eqx.is_array(node) else node, self)
@@ -207,15 +188,15 @@ class AMCDQN(eqx.Module):
         return single_model(observation).argmax()
 
     def vi_update(self, key: PRNGKeyArray):
-        model_key, target_key, key = jr.split(key, 3)
+        model_key, target_key, resample_key, key = jr.split(key, 4)
 
         def compute_mle_params(ensemble_models):
             def compute_stats(node):
                 # Compute empirical mean and variance across ensemble
                 if eqx.is_inexact_array(node):
                     mean = jnp.mean(node, axis=0)
-                    var = jnp.var(node, axis=0) + 1e-3
-                    logvar = jnp.log(var)
+                    var = jnp.var(node, axis=0)
+                    logvar = jnp.log(var) * 0.8 + (-2 * 0.2)
                     return mean, logvar
                 else:
                     return node, node
@@ -244,16 +225,29 @@ class AMCDQN(eqx.Module):
             is_leaf=eqx.is_inexact_array,
         )
 
-        self = eqx.tree_at(lambda s: s.vi_mean, self, new_vi_mean)
-        self = eqx.tree_at(lambda s: s.vi_logvar, self, new_vi_logvar)
-
         partial = eqx.filter_vmap(
             eqx.Partial(sample_new_model, mean=new_vi_mean, logvar=new_vi_logvar)
         )
-        new_models = partial(jr.split(model_key, self.ensemble_size))
+        new_model = partial(jr.split(model_key, self.ensemble_size))
 
-        self = eqx.tree_at(lambda s: s.model, self, new_models)
-        self = eqx.tree_at(lambda s: s.target_model, self, new_models)
+        update = jr.bernoulli(resample_key, 0.5, (self.ensemble_size,))
+        model = self.model
+
+        def _set_helper(old, new, i):
+            if not eqx.is_inexact_array(old):
+                return old
+            return jax.lax.cond(update[i], lambda: old.at[i].set(new[i]), lambda: old)
+
+        for i in range(self.ensemble_size):
+            model = jax.tree.map(
+                eqx.Partial(_set_helper, i=i),
+                model,
+                new_model,
+                is_leaf=eqx.is_inexact_array,
+            )
+
+        self = eqx.tree_at(lambda s: s.model, self, model)
+        self = eqx.tree_at(lambda s: s.target_model, self, model)
 
         return self
 

@@ -25,7 +25,7 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
-max_trainings_in_parallel = 20
+max_trainings_in_parallel = 25
 
 
 class Config(eqx.Module):
@@ -122,7 +122,7 @@ def main(key=None, cfg=Config(), debug=False):
     elif cfg.kind == "amc":
         model = AMCDQN(
             action_space=action_space,
-            model_factory=lambda k: Model(obs_size, act_size, key=k),
+            model_factory=lambda k: ModelWithPrior(obs_size, act_size, scale=3, key=k),
             ensemble_size=cfg.ensemble_size,
             key=model_key,
         )
@@ -257,11 +257,24 @@ def main(key=None, cfg=Config(), debug=False):
 
         # synchronize the target model once in a while
         if cfg.kind == "amc":
+            do_resample = i % (500 // cfg.num_envs) == (500 // cfg.num_envs - 1)
+
             model = filtered_cond(
-                i % (500 // cfg.num_envs) == (500 // cfg.num_envs - 1),
+                do_resample,
                 lambda: model.vi_update(remake_key),
                 lambda: model,
             )
+            """
+            jax.lax.cond(
+                do_resample,
+                lambda: jax.debug.callback(
+                    lambda do, v: print(v) if do else None,
+                    do_resample,
+                    model.vi_logvar.layers[1].weight[3, 4],
+                ),
+                lambda: None,
+            )
+            """
         else:
             # Regular target update for other methods
             model = eqx.tree_at(
@@ -315,6 +328,7 @@ def schedule_runs(
     folder_path = Path(output_root) / run_name
 
     if folder_path.exists():
+        raise RuntimeWarning(f"{folder_path} exists hence skipping")
         return
 
     results = []
@@ -373,18 +387,16 @@ def schedule_runs(
 
 
 if __name__ == "__main__":
-    experiment = "12"
-    hardness = 16
+    experiment = "11"
+    hardness = 12
     N = 100
     schedule_runs(
         N,
         cfg=Config(kind="amc", num_episodes=10_000, ensemble_size=10, hardness=hardness),
         output_root=f"results/{experiment}",
     )
-    """
     schedule_runs(
         N,
         cfg=Config(kind="boot", num_episodes=10_000, ensemble_size=10, hardness=hardness),
         output_root=f"results/{experiment}",
     )
-    """
