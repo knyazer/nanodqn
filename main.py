@@ -397,9 +397,9 @@ def schedule_runs(
 if __name__ == "__main__":
     experiment = "14"
     N = 50
-    for hardness in [6, 8, 10, 12, 14, 16]:
-        for ens_size in [2, 3, 5, 7, 10, 12, 16]:
-            for kind in ["boot", "bootrp"]:
+    for kind in ["boot", "bootrp"]:
+        for hardness in [6, 8, 10, 12, 14, 16]:
+            for ens_size in [2, 3, 5, 7, 10, 12, 16]:
                 schedule_runs(
                     N,
                     cfg=Config(

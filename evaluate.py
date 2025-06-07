@@ -173,12 +173,63 @@ def plot02():
     plt.close()
 
 
+def plot14(agg: pd.DataFrame):
+    # Rename for clarity if needed
+    if "weak_convergence" in agg.columns and "weak_probability" not in agg.columns:
+        agg = agg.rename(columns={"weak_convergence": "weak_probability"})
+
+    # Unique sorted values for K and n
+    Ks = sorted(agg["ensemble_size"].unique())
+    ns = sorted(agg["hardness"].unique())
+
+    # 1. Fixed K, plot weak_probability vs. n
+    fig1, axes1 = plt.subplots(nrows=(len(Ks) + 2) // 3, ncols=3, figsize=(15, 10))
+    axes1 = axes1.flatten()
+    for i, K in enumerate(Ks):
+        ax = axes1[i]
+        subdf = agg[agg["ensemble_size"] == K]
+        for kind in subdf["kind"].unique():
+            plot_df = subdf[subdf["kind"] == kind].sort_values(by="hardness")
+            ax.plot(plot_df["hardness"], plot_df["weak_probability"], label=kind, marker="o")
+        ax.set_title(f"K={K}")
+        ax.set_xlabel("hardness")
+        ax.set_ylabel("weak_probability")
+        ax.grid(True)
+        ax.legend()
+    fig1.suptitle("Weak Probability vs. n (fixed K)")
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.92)
+    plt.savefig("plots/14_a.svg")
+    plt.savefig("plots/png/14_a.png", dpi=300)
+    plt.close()
+    # 2. Fixed n, plot weak_probability vs. K
+    fig2, axes2 = plt.subplots(nrows=(len(ns) + 2) // 3, ncols=3, figsize=(15, 10))
+    axes2 = axes2.flatten()
+    for i, n_val in enumerate(ns):
+        ax = axes2[i]
+        subdf = agg[agg["hardness"] == n_val]
+        for kind in subdf["kind"].unique():
+            plot_df = subdf[subdf["kind"] == kind].sort_values(by="ensemble_size")
+            ax.plot(plot_df["ensemble_size"], plot_df["weak_probability"], label=kind, marker="o")
+        ax.set_title(f"hardness={n_val}")
+        ax.set_xlabel("K")
+        ax.set_ylabel("weak_probability")
+        ax.grid(True)
+        ax.legend()
+    fig2.suptitle("Weak Probability vs. K (fixed n)")
+    plt.tight_layout()
+    plt.subplots_adjust(top=0.92)
+    plt.savefig("plots/14_b.svg")
+    plt.savefig("plots/png/14_b.png", dpi=300)
+    plt.close()
+
+
 if __name__ == "__main__":
-    # plot01()
-    # plot02()
-    # plot04()
     agg = make_agg("14")
+    plot14(agg)
+
     kinds = ["boot", "bootrp"]
+
     print(kinds)
     for hardness in sorted(agg["hardness"].unique()):
         for ens_size in sorted(agg["ensemble_size"].unique()):
