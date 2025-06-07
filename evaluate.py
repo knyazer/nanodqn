@@ -177,5 +177,18 @@ if __name__ == "__main__":
     # plot01()
     # plot02()
     # plot04()
-    agg = make_agg("11")
-    print(agg)
+    agg = make_agg("14")
+    kinds = ["boot", "bootrp"]
+    print(kinds)
+    for hardness in sorted(agg["hardness"].unique()):
+        for ens_size in sorted(agg["ensemble_size"].unique()):
+            df = agg.query(f"hardness == {hardness} and ensemble_size == {ens_size}")
+            print(f"hardness={hardness},K={ens_size}: \t", end="")
+            for kind in kinds:
+                fdf = df.loc[df["kind"] == kind, "weak_convergence"]
+                v = fdf.iloc[0] if not fdf.empty else None
+                if v is not None:
+                    print(f"{f'{v:.2f}':<10}", end="\t")
+                else:
+                    print(f"{'undefined':<10}", end="\t")
+            print()

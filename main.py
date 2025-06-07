@@ -78,7 +78,7 @@ def main(key=None, cfg=Config(), debug=False):
     single_obs = obs[0]
     obs_size = single_obs.size
 
-    rb_mask_size = cfg.ensemble_size if ("boot" in cfg.kind or cfg.kind == "amc") else 1
+    rb_mask_size = cfg.ensemble_size if ("boot" in cfg.kind or "amc" in cfg.kind) else 1
 
     rb = ReplayBuffer.make(
         10_000,
@@ -122,7 +122,16 @@ def main(key=None, cfg=Config(), debug=False):
     elif cfg.kind == "amc":
         model = AMCDQN(
             action_space=action_space,
-            model_factory=lambda k: ModelWithPrior(obs_size, act_size, scale=3, key=k),
+            model_factory=lambda k: Model(obs_size, act_size, key=k),
+            ensemble_size=cfg.ensemble_size,
+            key=model_key,
+        )
+    elif cfg.kind == "amcrp":
+        model = AMCDQN(
+            action_space=action_space,
+            model_factory=lambda k: ModelWithPrior(
+                obs_size, act_size, scale=cfg.prior_scale, key=k
+            ),
             ensemble_size=cfg.ensemble_size,
             key=model_key,
         )
@@ -256,8 +265,8 @@ def main(key=None, cfg=Config(), debug=False):
         )
 
         # synchronize the target model once in a while
-        if cfg.kind == "amc":
-            do_resample = i % (500 // cfg.num_envs) == (500 // cfg.num_envs - 1)
+        if cfg.kind == "amc" or cfg.kind == "amcrp":
+            do_resample = i % (1000 // cfg.num_envs) == (1000 // cfg.num_envs - 1)
 
             model = filtered_cond(
                 do_resample,
@@ -275,17 +284,16 @@ def main(key=None, cfg=Config(), debug=False):
                 lambda: None,
             )
             """
-        else:
-            # Regular target update for other methods
-            model = eqx.tree_at(
-                lambda _m: _m.target_model,
-                model,
-                jax.lax.cond(
-                    i % (500 // cfg.num_envs) == (500 // cfg.num_envs - 1),
-                    lambda: model.model,
-                    lambda: model.target_model,
-                ),
-            )
+        # Regular target update for other methods
+        model = eqx.tree_at(
+            lambda _m: _m.target_model,
+            model,
+            jax.lax.cond(
+                i % (500 // cfg.num_envs) == (500 // cfg.num_envs - 1),
+                lambda: model.model,
+                lambda: model.target_model,
+            ),
+        )
 
         key, _ = jr.split(key, 2)
         return model, rb, obs, state, model_indices, opt_state, key, rews, _log
@@ -323,12 +331,12 @@ def schedule_runs(
 ):
     # This function just reports results in a nice format
     VERSION = 1
-    run_name_base = f"N={N}_{cfg.short_str()}"
+    run_name_base = f"{cfg.short_str()}"
     run_name = run_name_base
     folder_path = Path(output_root) / run_name
 
     if folder_path.exists():
-        raise RuntimeWarning(f"{folder_path} exists hence skipping")
+        print(f"{folder_path} exists hence skipping")
         return
 
     results = []
@@ -387,16 +395,15 @@ def schedule_runs(
 
 
 if __name__ == "__main__":
-    experiment = "11"
-    hardness = 12
-    N = 100
-    schedule_runs(
-        N,
-        cfg=Config(kind="amc", num_episodes=10_000, ensemble_size=10, hardness=hardness),
-        output_root=f"results/{experiment}",
-    )
-    schedule_runs(
-        N,
-        cfg=Config(kind="boot", num_episodes=10_000, ensemble_size=10, hardness=hardness),
-        output_root=f"results/{experiment}",
-    )
+    experiment = "14"
+    N = 50
+    for hardness in [6, 8, 10, 12, 14, 16]:
+        for ens_size in [2, 3, 5, 7, 10, 12, 16]:
+            for kind in ["boot", "bootrp"]:
+                schedule_runs(
+                    N,
+                    cfg=Config(
+                        kind=kind, num_episodes=50_000, ensemble_size=ens_size, hardness=hardness
+                    ),
+                    output_root=f"results/{experiment}",
+                )

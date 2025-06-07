@@ -60,7 +60,7 @@ class Model(eqx.Module):
 
 class ModelWithPrior(Model):
     prior: Model
-    scale: float
+    scale: float = eqx.field(static=True)
 
     def __init__(self, observation_size, action_size, /, scale, key, layer_sizes=None):
         k1, k2 = jr.split(key)
@@ -135,19 +135,16 @@ class AMCDQN(eqx.Module):
         self.action_space = action_space
         self.ensemble_size = ensemble_size
 
-        vi_key, sample_key = jr.split(key)
+        tkey, mkey = jr.split(key)
+        keys = jr.split(mkey, ensemble_size)
+        models = [model_factory(mkey) for mkey in keys]
 
-        # Sample initial ensemble from VI distribution
-        sample_keys = jr.split(sample_key, ensemble_size * 2)
-        model_keys, target_keys = sample_keys[:ensemble_size], sample_keys[ensemble_size:]
+        keys = jr.split(tkey, ensemble_size)
+        tmodels = [model_factory(tkey) for tkey in keys]
 
-        models = [model_factory(k) for k in model_keys]
-        target_models = [model_factory(k) for k in target_keys]
-
-        # Stack like in Bootstrapped
         self.model = jax.tree.map(lambda *nodes: jnp.stack(nodes), *models, is_leaf=eqx.is_array)
         self.target_model = jax.tree.map(
-            lambda *nodes: jnp.stack(nodes), *target_models, is_leaf=eqx.is_array
+            lambda *nodes: jnp.stack(nodes), *tmodels, is_leaf=eqx.is_array
         )
 
     def __getitem__(self, idx):
@@ -207,16 +204,16 @@ class AMCDQN(eqx.Module):
                 jax.tree.map(lambda t: t[1], tupled, is_leaf=lambda x: isinstance(x, tuple)),
             )
 
-        def sample_new_model(key, mean, logvar):
-            def sample_array(mean_arr, logvar_arr, key):
-                if eqx.is_inexact_array(mean_arr):
+        def sample_new_model(key, old_model, mean, logvar):
+            def sample_array(old_arr, mean_arr, logvar_arr, key):
+                if eqx.is_inexact_array(old_arr):
                     return (
                         jnp.sqrt(jnp.exp(logvar_arr)) * jr.normal(key, logvar_arr.shape) + mean_arr
                     )
                 else:
-                    return mean_arr
+                    return old_arr
 
-            return jax.tree.map(sample_array, mean, logvar, keys_like(mean, key))
+            return jax.tree.map(sample_array, old_model, mean, logvar, keys_like(mean, key))
 
         new_vi_mean, new_vi_logvar = compute_mle_params(self.model)
         new_vi_logvar = jax.tree.map(
@@ -226,7 +223,9 @@ class AMCDQN(eqx.Module):
         )
 
         partial = eqx.filter_vmap(
-            eqx.Partial(sample_new_model, mean=new_vi_mean, logvar=new_vi_logvar)
+            eqx.Partial(
+                sample_new_model, old_model=self.model, mean=new_vi_mean, logvar=new_vi_logvar
+            )
         )
         new_model = partial(jr.split(model_key, self.ensemble_size))
 
