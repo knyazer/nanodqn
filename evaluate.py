@@ -173,55 +173,101 @@ def plot02():
     plt.close()
 
 
+SLOW_CURVE = True
+
+
+def plot_theoretical(ax, x_values, K_or_n, is_fixed_K):
+    cmap = plt.get_cmap("plasma")
+    if SLOW_CURVE:
+        betas = np.linspace(0.68, 0.8, 4)
+        colors = cmap(np.linspace(0, 1, len(betas)))
+        for beta, color in zip(betas, colors):
+            if is_fixed_K:
+                # x_values are n, fixed K_or_n = K
+                y = [1 - (1 - beta**n_val) ** K_or_n for n_val in x_values]
+            else:
+                # x_values are K, fixed K_or_n = n
+                y = [1 - (1 - beta**K_or_n) ** K_val for K_val in x_values]
+            label = f"$1 - (1 - {beta:.2f}^n)^K$"
+            ax.plot(x_values, y, linestyle="--", color=color, label=label)
+    else:
+        betas = np.linspace(0.4, 0.6, 4)
+        colors = cmap(np.linspace(0, 1, len(betas)))
+        for beta, color in zip(betas, colors):
+            if is_fixed_K:
+                # x_values are n, fixed K_or_n = K
+                y = [(1 - beta**K_or_n) ** n_val for n_val in x_values]
+            else:
+                # x_values are K, fixed K_or_n = n
+                y = [(1 - beta**K_val) ** K_or_n for K_val in x_values]
+
+            label = f"$(1 - {beta:.2f}^n)^K$"
+            ax.plot(x_values, y, linestyle="--", color=color, label=label)
+
+
 def plot14(agg: pd.DataFrame):
-    # Rename for clarity if needed
+    # Rename if needed
     if "weak_convergence" in agg.columns and "weak_probability" not in agg.columns:
         agg = agg.rename(columns={"weak_convergence": "weak_probability"})
 
-    # Unique sorted values for K and n
+    # Sorted unique K and n
     Ks = sorted(agg["ensemble_size"].unique())
     ns = sorted(agg["hardness"].unique())
 
-    # 1. Fixed K, plot weak_probability vs. n
-    fig1, axes1 = plt.subplots(nrows=(len(Ks) + 2) // 3, ncols=3, figsize=(15, 10))
+    # Prepare colors
+
+    # 1. Fixed K: vs n
+    fig1, axes1 = plt.subplots((len(Ks) + 2) // 3, 3, figsize=(15, 10))
     axes1 = axes1.flatten()
     for i, K in enumerate(Ks):
         ax = axes1[i]
         subdf = agg[agg["ensemble_size"] == K]
+        # Empirical
         for kind in subdf["kind"].unique():
-            plot_df = subdf[subdf["kind"] == kind].sort_values(by="hardness")
-            ax.plot(plot_df["hardness"], plot_df["weak_probability"], label=kind, marker="o")
+            pdf = subdf[subdf["kind"] == kind].sort_values(by="hardness")
+            ax.plot(
+                pdf["hardness"], pdf["weak_probability"], marker="o", label=f"empirical ({kind})"
+            )
+        # Theoretical
+        plot_theoretical(ax, ns, K, True)
         ax.set_title(f"K={K}")
-        ax.set_xlabel("hardness")
+        ax.set_xlabel("hardness (n)")
         ax.set_ylabel("weak_probability")
         ax.grid(True)
-        ax.legend()
+        ax.legend(fontsize="small", ncol=2)
     fig1.suptitle("Weak Probability vs. n (fixed K)")
     plt.tight_layout()
     plt.subplots_adjust(top=0.92)
-    plt.savefig("plots/14_a.svg")
-    plt.savefig("plots/png/14_a.png", dpi=300)
-    plt.close()
-    # 2. Fixed n, plot weak_probability vs. K
-    fig2, axes2 = plt.subplots(nrows=(len(ns) + 2) // 3, ncols=3, figsize=(15, 10))
+    fig1.savefig("plots/14_a.svg")
+    fig1.savefig("plots/png/14_a.png", dpi=300)
+    plt.close(fig1)
+
+    # 2. Fixed n: vs K
+    fig2, axes2 = plt.subplots((len(ns) + 2) // 3, 3, figsize=(15, 10))
     axes2 = axes2.flatten()
     for i, n_val in enumerate(ns):
         ax = axes2[i]
         subdf = agg[agg["hardness"] == n_val]
         for kind in subdf["kind"].unique():
-            plot_df = subdf[subdf["kind"] == kind].sort_values(by="ensemble_size")
-            ax.plot(plot_df["ensemble_size"], plot_df["weak_probability"], label=kind, marker="o")
+            pdf = subdf[subdf["kind"] == kind].sort_values(by="ensemble_size")
+            ax.plot(
+                pdf["ensemble_size"],
+                pdf["weak_probability"],
+                marker="o",
+                label=f"empirical ({kind})",
+            )
+        plot_theoretical(ax, Ks, n_val, False)
         ax.set_title(f"hardness={n_val}")
-        ax.set_xlabel("K")
+        ax.set_xlabel("ensemble size (K)")
         ax.set_ylabel("weak_probability")
         ax.grid(True)
-        ax.legend()
+        ax.legend(fontsize="small", ncol=2)
     fig2.suptitle("Weak Probability vs. K (fixed n)")
     plt.tight_layout()
     plt.subplots_adjust(top=0.92)
-    plt.savefig("plots/14_b.svg")
-    plt.savefig("plots/png/14_b.png", dpi=300)
-    plt.close()
+    fig2.savefig("plots/14_b.svg")
+    fig2.savefig("plots/png/14_b.png", dpi=300)
+    plt.close(fig2)
 
 
 if __name__ == "__main__":
