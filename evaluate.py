@@ -111,7 +111,7 @@ def make_agg(version):
                 "mean_time_to_weak": df["time_to_weak"].mean(),
                 "max_time_to_weak": df["time_to_weak"].max(),
                 "mean_time_to_strong": df["time_to_strong"].mean(),
-                "weak_convergence": (df["time_to_weak"] != df["time_to_weak"].max()).sum()
+                "weak_convergence": ((df["time_to_weak"] != df["time_to_weak"].max()).sum())
                 / len(df),
                 "ensemble_size": cfg.ensemble_size,
                 "hardness": cfg.hardness,
@@ -173,12 +173,13 @@ def plot02():
     plt.close()
 
 
-SLOW_CURVE = True
+SLOW_CURVE = False
+LOG_SCALE = False
 
 
-def plot_theoretical(ax, x_values, K_or_n, is_fixed_K):
+def plot_theoretical(ax, x_values, K_or_n, is_fixed_K, slow=SLOW_CURVE):
     cmap = plt.get_cmap("plasma")
-    if SLOW_CURVE:
+    if slow:
         betas = np.linspace(0.68, 0.8, 4)
         colors = cmap(np.linspace(0, 1, len(betas)))
         for beta, color in zip(betas, colors):
@@ -214,13 +215,29 @@ def plot14(agg: pd.DataFrame):
     Ks = sorted(agg["ensemble_size"].unique())
     ns = sorted(agg["hardness"].unique())
 
-    # Prepare colors
+    def forward_log_1m(x):
+        return np.where(x == 1, -1_000, np.log(1 - x))
+
+    def inverse_log_1m(x):
+        return 1 - np.exp(x)
+
+    def set_scale(ax, inverted=False):
+        if LOG_SCALE:
+            ax.set_ylim([0.01, 0.99])
+            if inverted:
+                # ax.set_yscale("log")
+                ax.set_yscale("function", functions=(forward_log_1m, inverse_log_1m))
+            else:
+                ax.set_yscale("log")
+        else:
+            pass
 
     # 1. Fixed K: vs n
-    fig1, axes1 = plt.subplots((len(Ks) + 2) // 3, 3, figsize=(15, 10))
+    fig1, axes1 = plt.subplots((len(Ks) + 2) // 3, 3, figsize=(15, 15))
     axes1 = axes1.flatten()
     for i, K in enumerate(Ks):
         ax = axes1[i]
+        set_scale(ax)
         subdf = agg[agg["ensemble_size"] == K]
         # Empirical
         for kind in subdf["kind"].unique():
@@ -243,10 +260,11 @@ def plot14(agg: pd.DataFrame):
     plt.close(fig1)
 
     # 2. Fixed n: vs K
-    fig2, axes2 = plt.subplots((len(ns) + 2) // 3, 3, figsize=(15, 10))
+    fig2, axes2 = plt.subplots((len(ns) + 2) // 3, 3, figsize=(15, 15))
     axes2 = axes2.flatten()
     for i, n_val in enumerate(ns):
         ax = axes2[i]
+        set_scale(ax, True)
         subdf = agg[agg["hardness"] == n_val]
         for kind in subdf["kind"].unique():
             pdf = subdf[subdf["kind"] == kind].sort_values(by="ensemble_size")
