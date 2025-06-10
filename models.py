@@ -57,6 +57,38 @@ class Model(eqx.Module):
         x = self.layers[-1](x)
         return x
 
+    def self_loss(self):
+        return 0
+
+
+def tree_diff(pytree_a, pytree_b):
+    per_leaf = jax.tree_util.tree_map(
+        lambda x, y: jnp.mean((x - y) ** 2),  # reduce each leaf to a scalar
+        pytree_a,
+        pytree_b,
+    )
+    return jax.tree_util.tree_reduce(jnp.add, per_leaf, initializer=0.0)
+
+
+class MagicModel(Model):
+    anchor: Model
+
+    def __init__(self, observation_size, action_size, /, key, layer_sizes=None):
+        k1, k2 = jr.split(key)
+        super().__init__(observation_size, action_size, key=k1, layer_sizes=layer_sizes)
+
+        self.anchor = Model(observation_size, action_size, key=k2, layer_sizes=layer_sizes)
+
+    def __call__(self, x):
+        return super().__call__(x)
+
+    def self_loss(self):
+        # lower is better
+        return -1e-2 * tree_diff(
+            eqx.filter(self.layers, eqx.is_inexact_array),
+            jax.lax.stop_gradient(eqx.filter(self.anchor.layers, eqx.is_inexact_array)),
+        )
+
 
 class ModelWithPrior(Model):
     prior: Model
@@ -71,6 +103,9 @@ class ModelWithPrior(Model):
 
     def __call__(self, x):
         return super().__call__(x) + jax.lax.stop_gradient(self.prior(x) * self.scale)
+
+    def self_loss(self):
+        return 0
 
 
 gamma = 0.99
@@ -294,10 +329,15 @@ class Bootstrapped(DQN):
     def __len__(self):
         return self.ensemble_size
 
+    def self_loss(self):
+        loss = 0
+        for idx in range(self.ensemble_size):
+            loss += self[idx].model.self_loss()
+        return loss
+
     def loss(self, key: PRNGKeyArray, sample):
         rkey, subkey, key = jr.split(key, 3)
 
-        # sample data from the buffer
         model_index = jr.randint(subkey, (), 0, self.ensemble_size)
         self = self[model_index]
 

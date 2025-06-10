@@ -289,8 +289,8 @@ def plot14(agg: pd.DataFrame):
 
 
 if __name__ == "__main__":
-    agg = make_agg("14")
-    plot14(agg)
+    agg = make_agg("19")
+    # plot14(agg)
 
     kinds = ["boot", "bootrp"]
 
@@ -303,7 +303,7 @@ if __name__ == "__main__":
                 fdf = df.loc[df["kind"] == kind, "weak_convergence"]
                 v = fdf.iloc[0] if not fdf.empty else None
                 if v is not None:
-                    print(f"{f'{v:.2f}':<10}", end="\t")
+                    print(f"{f'{v:.3f}':<10}", end="\t")
                 else:
                     print(f"{'undefined':<10}", end="\t")
             print()

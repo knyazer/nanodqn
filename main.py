@@ -16,7 +16,16 @@ import dataclasses
 import hashlib
 import json
 from pathlib import Path
-from models import Model, ModelWithPrior, DQN, Bootstrapped, EpsilonGreedy, AMCDQN, filtered_cond
+from models import (
+    Model,
+    ModelWithPrior,
+    DQN,
+    Bootstrapped,
+    EpsilonGreedy,
+    AMCDQN,
+    filtered_cond,
+    MagicModel,
+)
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 
@@ -25,13 +34,13 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
-max_trainings_in_parallel = 25
+max_trainings_in_parallel = 10
 
 
 class Config(eqx.Module):
     batch_size: int = 128
-    lr: float = 1e-4
-    num_envs: int = 16
+    lr: float = 2e-4
+    envs_per_member: int = 8
     ensemble_size: int = 4
     prior_scale: float = 3
     env_name: str = "DeepSea-bsuite"
@@ -39,7 +48,6 @@ class Config(eqx.Module):
     hardness: int = 12
     randomize_actions: bool = True
     num_episodes: int = 10_000
-    dqn_episodes_to_reset: int = 0
 
     def autoseed(self):
         cfg_dict = dataclasses.asdict(self)
@@ -63,12 +71,14 @@ def main(key=None, cfg=Config(), debug=False):
             cfg.ensemble_size,
             cfg.hardness,
         )
+
+    num_envs = cfg.ensemble_size * cfg.envs_per_member
     key, model_key, target_model_key, reset_key, loop_key, ikey = jr.split(key, 6)
 
     env, env_params = gymnax.make(
         cfg.env_name, size=cfg.hardness, randomize_actions=cfg.randomize_actions
     )
-    obs, state = jax.vmap(lambda k: env.reset(k, env_params))(jr.split(reset_key, cfg.num_envs))
+    obs, state = jax.vmap(lambda k: env.reset(k, env_params))(jr.split(reset_key, num_envs))
     action_space = env.action_space(env_params)  # type: ignore
 
     assert "n" in action_space.__dict__, (
@@ -91,7 +101,7 @@ def main(key=None, cfg=Config(), debug=False):
     if cfg.kind == "boot":
         model = Bootstrapped(
             action_space=action_space,
-            model_factory=lambda k: Model(obs_size, act_size, key=k),
+            model_factory=lambda k: MagicModel(obs_size, act_size, key=k),
             ensemble_size=cfg.ensemble_size,
             key=model_key,
         )
@@ -141,7 +151,7 @@ def main(key=None, cfg=Config(), debug=False):
         )
 
     key, _ = jr.split(key, 2)
-    optim = optax.adamw(cfg.lr)
+    optim = optax.adam(cfg.lr * cfg.ensemble_size)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
 
     @eqx.filter_jit(donate="all-except-first")
@@ -149,10 +159,10 @@ def main(key=None, cfg=Config(), debug=False):
         key, fkey = jr.split(key)
 
         def loss_wrap(model):
-            keys = jr.split(fkey, cfg.batch_size)
-            samples = rb.sample(key, cfg.batch_size)
+            keys = jr.split(fkey, cfg.batch_size * cfg.ensemble_size)
+            samples = rb.sample(key, cfg.batch_size * cfg.ensemble_size)
             loss, aux = eqx.filter_vmap(model.loss)(keys, samples)
-            return loss.mean(), aux
+            return loss.mean() + model.self_loss(), aux
 
         (loss, info), grads = eqx.filter_value_and_grad(loss_wrap, has_aux=True)(model)
         updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_inexact_array))
@@ -172,7 +182,7 @@ def main(key=None, cfg=Config(), debug=False):
             return *env.step(step_key, state, action, env_params), action
 
         n_obs, state, reward, done, _, action = eqx.filter_vmap(unbatched_step)(
-            jr.split(step_key, cfg.num_envs), state, obs, model_indices
+            jr.split(step_key, num_envs), state, obs, model_indices
         )
 
         # NOTE: The mask does not do anything as of now: this is fine, follows p=1
@@ -182,7 +192,7 @@ def main(key=None, cfg=Config(), debug=False):
             action,
             reward,
             done,
-            mask=jr.bernoulli(mask_key, p=0.5, shape=(*reward.shape, rb_mask_size)),
+            mask=jr.bernoulli(mask_key, p=1.0, shape=(*reward.shape, rb_mask_size)),
         )
         obs = n_obs
 
@@ -202,7 +212,7 @@ def main(key=None, cfg=Config(), debug=False):
             (obs, state),
             subkey,
             progress=0,
-            model_indices=jnp.arange(cfg.num_envs),
+            model_indices=jnp.arange(num_envs) // cfg.envs_per_member,
         )
         carry = (model, rb, (obs, state))
         carry_dyn, _ = eqx.partition(carry, eqx.is_array)
@@ -210,7 +220,7 @@ def main(key=None, cfg=Config(), debug=False):
 
     carry = (model, rb, (obs, state))
     carry_dyn, carry_st = eqx.partition(carry, eqx.is_array)
-    n_iters = rb.buffer_size // cfg.num_envs
+    n_iters = rb.buffer_size // num_envs
     carry_dyn, _ = jax.lax.scan(
         eqx.Partial(rb_scan_fn, carry_st=carry_st), init=carry_dyn, xs=jr.split(key, n_iters)
     )
@@ -224,7 +234,7 @@ def main(key=None, cfg=Config(), debug=False):
     def inner_loop(model, rb, obs, state, model_indices, opt_state, key, rews, i):
         progress = jnp.clip(i / num_steps, 0.0, 1.0)
         key, subkey, train_key, remake_key = jr.split(key, 4)
-        d_key = jr.split(subkey, cfg.num_envs)
+        d_key = jr.split(subkey, num_envs)
 
         # a single step in all the repeats of the environments
         model, rb, (obs, state), (dones, c_rewards) = step(
@@ -245,7 +255,6 @@ def main(key=None, cfg=Config(), debug=False):
         def episode_done(rews, model_indices, j):
             # in case an episode is completed we set the reward to an observed one,
             # and choose a new member to be ran
-            model_indices = model_indices.at[j].set(jr.randint(d_key[j], (), 0, cfg.ensemble_size))
             rews = rews.at[j].set(0)
             return rews, model_indices
 
@@ -264,32 +273,12 @@ def main(key=None, cfg=Config(), debug=False):
             xs=jnp.arange(len(dones)),
         )
 
-        # synchronize the target model once in a while
-        if cfg.kind == "amc" or cfg.kind == "amcrp":
-            do_resample = i % (1000 // cfg.num_envs) == (1000 // cfg.num_envs - 1)
-
-            model = filtered_cond(
-                do_resample,
-                lambda: model.vi_update(remake_key),
-                lambda: model,
-            )
-            """
-            jax.lax.cond(
-                do_resample,
-                lambda: jax.debug.callback(
-                    lambda do, v: print(v) if do else None,
-                    do_resample,
-                    model.vi_logvar.layers[1].weight[3, 4],
-                ),
-                lambda: None,
-            )
-            """
         # Regular target update for other methods
         model = eqx.tree_at(
             lambda _m: _m.target_model,
             model,
             jax.lax.cond(
-                i % (500 // cfg.num_envs) == (500 // cfg.num_envs - 1),
+                i % 50 == (50 - 1),
                 lambda: model.model,
                 lambda: model.target_model,
             ),
@@ -298,13 +287,15 @@ def main(key=None, cfg=Config(), debug=False):
         key, _ = jr.split(key, 2)
         return model, rb, obs, state, model_indices, opt_state, key, rews, _log
 
-    rews = np.zeros((cfg.num_envs,), dtype=np.float32)
+    rews = np.zeros((num_envs,), dtype=np.float32)
     # NOTE: I want to have exactly "Y" episodes, not exactly "Z" steps!!
     # NOTE: each episode in deepsea takes exactly 'hardness' steps
     assert "DeepSea" in cfg.env_name, "you schedule episodes based on hardness"
-    num_steps = cfg.num_episodes * cfg.hardness // cfg.num_envs
+    num_steps = cfg.num_episodes * cfg.hardness // num_envs
 
-    model_indices = jr.randint(ikey, (cfg.num_envs,), 0, cfg.ensemble_size)
+    model_indices = (
+        jnp.arange(num_envs) // cfg.envs_per_member
+    )  # jr.randint(ikey, (cfg.num_envs,), 0, cfg.ensemble_size)
 
     def inner_loop_wrap(carry_dyn, i, carry_st):
         carry = eqx.combine(carry_dyn, carry_st)
@@ -395,15 +386,15 @@ def schedule_runs(
 
 
 if __name__ == "__main__":
-    experiment = "14"
-    N = 50
-    for hardness in [4, 6, 8, 10, 12, 14, 16, 20, 24, 32, 40]:
-        for ens_size in [7, 10, 12, 16, 20, 32]:
-            for kind in ["bootrp"]:  # ["boot", "bootrp"]:
+    experiment = "19"
+    N = 20
+    for hardness in [20, 32]:
+        for ens_size in [5, 10]:
+            for kind in ["boot", "bootrp"]:  # ["boot", "bootrp"]:
                 schedule_runs(
                     N,
                     cfg=Config(
-                        kind=kind, num_episodes=50_000, ensemble_size=ens_size, hardness=hardness
+                        kind=kind, num_episodes=40_000, ensemble_size=ens_size, hardness=hardness
                     ),
                     output_root=f"results/{experiment}",
                 )
