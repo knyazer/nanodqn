@@ -22,9 +22,6 @@ from models import (
     DQN,
     Bootstrapped,
     EpsilonGreedy,
-    AMCDQN,
-    filtered_cond,
-    MagicModel,
 )
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
@@ -34,21 +31,21 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
-max_trainings_in_parallel = 10
+max_trainings_in_parallel = 50
 
 
 class Config(eqx.Module):
     batch_size: int = 128
-    lr: float = 2e-4
-    psi: float = -1e-2
-    envs_per_member: int = 8
+    lr: float = 3e-4
+    num_envs: int = 24
     ensemble_size: int = 4
     prior_scale: float = 3
     env_name: str = "DeepSea-bsuite"
-    kind: str = "dqn"
+    kind: str = "boot"
     hardness: int = 24
-    randomize_actions: bool = True
+    randomize_actions: bool = True  # environment, don't switch to False unless you are _very_ sure
     num_episodes: int = 10_000
+    rb_size: int = 10_000
 
     def autoseed(self):
         cfg_dict = dataclasses.asdict(self)
@@ -65,6 +62,7 @@ class Config(eqx.Module):
 
 @eqx.filter_jit
 def main(key=None, cfg=Config(), debug=False):
+    assert key is not None, "Please specify 'key' as an argument to main"
     if debug:
         jax.debug.print(
             "Main is running with: kind={}, ensemble_size={}, hardness={}",
@@ -73,13 +71,12 @@ def main(key=None, cfg=Config(), debug=False):
             cfg.hardness,
         )
 
-    num_envs = cfg.ensemble_size * cfg.envs_per_member
     key, model_key, target_model_key, reset_key, loop_key, ikey = jr.split(key, 6)
 
     env, env_params = gymnax.make(
         cfg.env_name, size=cfg.hardness, randomize_actions=cfg.randomize_actions
     )
-    obs, state = jax.vmap(lambda k: env.reset(k, env_params))(jr.split(reset_key, num_envs))
+    obs, state = jax.vmap(lambda k: env.reset(k, env_params))(jr.split(reset_key, cfg.num_envs))
     action_space = env.action_space(env_params)  # type: ignore
 
     assert "n" in action_space.__dict__, (
@@ -91,18 +88,22 @@ def main(key=None, cfg=Config(), debug=False):
 
     rb_mask_size = cfg.ensemble_size if ("boot" in cfg.kind or "amc" in cfg.kind) else 1
 
+    compress_obs = lambda x: (jnp.array([jnp.argmax(x.ravel())]), x.shape)
+    decompress_obs = lambda s, x: jnp.zeros(s).at[jnp.unravel_index(x, s)].set(1)
+
     rb = ReplayBuffer.make(
-        10_000,
-        single_obs,
-        action_space.sample(key),
+        buffer_size=cfg.rb_size,
+        example_obs=single_obs,
+        example_act=action_space.sample(key),
         mask_size=rb_mask_size,
+        compress=None if "DeepSea" not in cfg.env_name else (compress_obs, decompress_obs),
     )
     key, _ = jr.split(key, 2)
 
     if cfg.kind == "boot":
         model = Bootstrapped(
             action_space=action_space,
-            model_factory=lambda k: MagicModel(obs_size, act_size, key=k, psi=cfg.psi),
+            model_factory=lambda k: Model(obs_size, act_size, key=k),
             ensemble_size=cfg.ensemble_size,
             key=model_key,
         )
@@ -124,34 +125,11 @@ def main(key=None, cfg=Config(), debug=False):
         raise RuntimeError(
             "Btw, epsilon greedy is probably broken because progress handling depends on a nonlocal value captured by closure which is probably bad idk"
         )
-    elif cfg.kind == "dqn":
-        model = DQN(
-            action_space=action_space,
-            model_factory=lambda k: Model(obs_size, act_size, key=k),
-            key=model_key,
-        )
-    elif cfg.kind == "amc":
-        model = AMCDQN(
-            action_space=action_space,
-            model_factory=lambda k: Model(obs_size, act_size, key=k),
-            ensemble_size=cfg.ensemble_size,
-            key=model_key,
-        )
-    elif cfg.kind == "amcrp":
-        model = AMCDQN(
-            action_space=action_space,
-            model_factory=lambda k: ModelWithPrior(
-                obs_size, act_size, scale=cfg.prior_scale, key=k
-            ),
-            ensemble_size=cfg.ensemble_size,
-            key=model_key,
-        )
     else:
         raise TypeError(
-            f"{cfg.kind} of the model is undefined, only allowed ['eps', 'boot', 'bootrp', 'dqn', 'amc']"
+            f"kind='{cfg.kind}' is undefined, only allowed ['eps', 'boot', 'bootrp']. If you want to use a standard dqn, set ensemble_size=1 for either boot or bootrp."
         )
 
-    key, _ = jr.split(key, 2)
     optim = optax.adamw(cfg.lr * cfg.ensemble_size)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
 
@@ -170,7 +148,7 @@ def main(key=None, cfg=Config(), debug=False):
         model = eqx.apply_updates(model, updates)
         return model, opt_state, (*info, loss)
 
-    @eqx.filter_jit
+    @eqx.filter_jit(donate="all")
     def step(model, rb, obs_state, key, progress, model_indices):
         obs, state = obs_state
         step_key, mask_key, key = jr.split(key, 3)
@@ -183,7 +161,7 @@ def main(key=None, cfg=Config(), debug=False):
             return *env.step(step_key, state, action, env_params), action
 
         n_obs, state, reward, done, _, action = eqx.filter_vmap(unbatched_step)(
-            jr.split(step_key, num_envs), state, obs, model_indices
+            jr.split(step_key, cfg.num_envs), state, obs, model_indices
         )
 
         # NOTE: The mask does not do anything as of now: this is fine, follows p=1
@@ -203,25 +181,24 @@ def main(key=None, cfg=Config(), debug=False):
         jax.debug.print("Starting to fill the replay buffer...")
 
     # collect stuff for the replay buffer
+
+    model_indices = jr.randint(ikey, (cfg.num_envs,), 0, cfg.ensemble_size)
+
     def rb_scan_fn(carry_dyn, key, carry_st):
         carry = eqx.combine(carry_dyn, carry_st)
         model, rb, (obs, state) = carry
-        key, subkey = jr.split(key)
+        key, ikey, subkey = jr.split(key, 3)
         model, rb, (obs, state), _ = step(
-            model,
-            rb,
-            (obs, state),
-            subkey,
-            progress=0,
-            model_indices=jnp.arange(num_envs) // cfg.envs_per_member,
+            model, rb, (obs, state), subkey, progress=0, model_indices=model_indices
         )
         carry = (model, rb, (obs, state))
         carry_dyn, _ = eqx.partition(carry, eqx.is_array)
         return carry_dyn, None
 
+    n_iters = rb.buffer_size // cfg.num_envs
+
     carry = (model, rb, (obs, state))
     carry_dyn, carry_st = eqx.partition(carry, eqx.is_array)
-    n_iters = rb.buffer_size // num_envs
     carry_dyn, _ = jax.lax.scan(
         eqx.Partial(rb_scan_fn, carry_st=carry_st), init=carry_dyn, xs=jr.split(key, n_iters)
     )
@@ -235,7 +212,7 @@ def main(key=None, cfg=Config(), debug=False):
     def inner_loop(model, rb, obs, state, model_indices, opt_state, key, rews, i):
         progress = jnp.clip(i / num_steps, 0.0, 1.0)
         key, subkey, train_key, remake_key = jr.split(key, 4)
-        d_key = jr.split(subkey, num_envs)
+        d_key = jr.split(subkey, cfg.num_envs)
 
         # a single step in all the repeats of the environments
         model, rb, (obs, state), (dones, c_rewards) = step(
@@ -255,7 +232,8 @@ def main(key=None, cfg=Config(), debug=False):
 
         def episode_done(rews, model_indices, j):
             # in case an episode is completed we set the reward to an observed one,
-            # and choose a new member to be ran
+            # and choose a new model index for the episode
+            model_indices = model_indices.at[j].set(jr.randint(d_key[j], (), 0, ensemble_size))
             rews = rews.at[j].set(0)
             return rews, model_indices
 
@@ -274,7 +252,7 @@ def main(key=None, cfg=Config(), debug=False):
             xs=jnp.arange(len(dones)),
         )
 
-        # Regular target update for other methods
+        # Regular target update: every 50 * cfg.num_envs
         model = eqx.tree_at(
             lambda _m: _m.target_model,
             model,
@@ -288,15 +266,13 @@ def main(key=None, cfg=Config(), debug=False):
         key, _ = jr.split(key, 2)
         return model, rb, obs, state, model_indices, opt_state, key, rews, _log
 
-    rews = np.zeros((num_envs,), dtype=np.float32)
+    rews = np.zeros((cfg.num_envs,), dtype=np.float32)
     # NOTE: I want to have exactly "Y" episodes, not exactly "Z" steps!!
     # NOTE: each episode in deepsea takes exactly 'hardness' steps
     assert "DeepSea" in cfg.env_name, "you schedule episodes based on hardness"
-    num_steps = cfg.num_episodes * cfg.hardness // num_envs
+    num_steps = cfg.num_episodes * cfg.hardness // cfg.num_envs
 
-    model_indices = (
-        jnp.arange(num_envs) // cfg.envs_per_member
-    )  # jr.randint(ikey, (cfg.num_envs,), 0, cfg.ensemble_size)
+    model_indices = jr.randint(ikey, (cfg.num_envs,), 0, cfg.ensemble_size)
 
     def inner_loop_wrap(carry_dyn, i, carry_st):
         carry = eqx.combine(carry_dyn, carry_st)
@@ -375,31 +351,33 @@ def schedule_runs(
             )
             tqdm.write(f"{results[-1]}")
 
-        if not folder_path.exists():
-            folder_path.mkdir(parents=True)
-            with open(folder_path / "config.yaml", "w") as f:
-                yaml.safe_dump(dataclasses.asdict(cfg), f)
-            with open(folder_path / ".version", "w") as f:
-                f.write(f"{VERSION}")
-        pd.DataFrame(results).to_csv(folder_path / "results.csv", index=False)
+    if not folder_path.exists():
+        folder_path.mkdir(parents=True)
+        with open(folder_path / "config.yaml", "w") as f:
+            yaml.safe_dump(dataclasses.asdict(cfg), f)
+        with open(folder_path / ".version", "w") as f:
+            f.write(f"{VERSION}")
+    pd.DataFrame(results).to_csv(folder_path / "results.csv", index=False)
 
     return results
 
 
 if __name__ == "__main__":
-    experiment = "22"
-    N = 10
-    for hardness in [36]:
-        for ensemble_size in [10, 20]:
-            for beta in [3.0, 5.0]:
+    experiment = "23"
+    N = 50
+    hardnesses = [5, 6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32]
+    ens_sizes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32]
+    print(f"{len(hardnesses) * len(ens_sizes) // 12} hours ish")
+    for kind in ["boot", "bootrp"]:
+        for hardness in [21]:
+            for ensemble_size in range(16, 32):
                 schedule_runs(
                     N,
                     cfg=Config(
-                        kind="bootrp",
+                        kind=kind,
                         num_episodes=50_000,
                         ensemble_size=ensemble_size,
                         hardness=hardness,
-                        prior_scale=beta,
                     ),
                     output_root=f"results/{experiment}",
                 )

@@ -27,12 +27,13 @@ class ReplayBuffer(eqx.Module):
 
     pos: Int[Array, ""]
     full: Bool[Array, ""]
+    compress: tuple | None
 
-    # --------------------------------------------------------------------- #
-    # construction
-    # --------------------------------------------------------------------- #
     @staticmethod
-    def make(buffer_size: int, example_obs: Any, example_act: Any, mask_size: int):
+    def make(buffer_size: int, example_obs: Any, example_act: Any, mask_size: int, compress=None):
+        if compress is not None:
+            example_obs, static = compress[0](example_obs)
+
         observations = jnp.zeros((buffer_size, *example_obs.shape), example_obs.dtype)
         next_observations = jnp.zeros((buffer_size, *example_obs.shape), example_obs.dtype)
         actions = jnp.zeros((buffer_size, *example_act.shape), example_act.dtype)
@@ -44,7 +45,16 @@ class ReplayBuffer(eqx.Module):
         full = jnp.zeros((), dtype=jnp.bool_)
 
         return ReplayBuffer(
-            buffer_size, observations, next_observations, actions, rewards, dones, masks, pos, full
+            buffer_size,
+            observations,
+            next_observations,
+            actions,
+            rewards,
+            dones,
+            masks,
+            pos,
+            full,
+            compress=None if compress is None else (*compress, static),
         )
 
     def add(
@@ -56,6 +66,9 @@ class ReplayBuffer(eqx.Module):
         done: Bool[Array, "k"],  # may arrive as (k,)
         mask: Bool[Array, "k n_nets"],
     ):
+        if self.compress is not None:
+            obs = jax.vmap(lambda v: self.compress[0](v)[0])(obs)
+            next_obs = jax.vmap(lambda v: self.compress[0](v)[0])(next_obs)
         k = obs.shape[0]  # batch size
 
         # ------------------------------------------------------------------ #
@@ -102,6 +115,7 @@ class ReplayBuffer(eqx.Module):
             new_masks,
             new_pos,
             new_full,
+            self.compress,
         )
 
     def sample(self, key, n) -> ReplayBufferSample:
@@ -109,9 +123,20 @@ class ReplayBuffer(eqx.Module):
 
         indices = jr.randint(key, (n,), 0, upper_bound)
 
+        obs = self.observations[indices]
+        next_obs = self.next_observations[indices]
+
+        if self.compress is not None:
+            obs = jax.vmap(lambda v: self.compress[1](self.compress[2], v))(
+                self.observations[indices]
+            )
+            next_obs = jax.vmap(lambda v: self.compress[1](self.compress[2], v))(
+                self.next_observations[indices]
+            )
+
         return ReplayBufferSample(
-            observations=self.observations[indices],
-            next_observations=self.next_observations[indices],
+            observations=obs,
+            next_observations=next_obs,
             actions=self.actions[indices],
             rewards=self.rewards[indices],
             dones=self.dones[indices],
