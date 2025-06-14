@@ -4,3 +4,4 @@ outputs
 results
 plots/png
 *.zip
+*csv

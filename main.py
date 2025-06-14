@@ -1,3 +1,4 @@
+import itertools
 import equinox as eqx
 import numpy as np
 from jax import random as jr
@@ -8,6 +9,7 @@ import gymnax
 from replay_buffer import ReplayBuffer
 from tqdm import tqdm as tqdm
 import optax
+import random
 import wandb
 import os
 import pandas as pd
@@ -15,6 +17,7 @@ import yaml
 import dataclasses
 import hashlib
 import json
+import time
 from pathlib import Path
 from models import (
     Model,
@@ -31,7 +34,7 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
-max_trainings_in_parallel = 50
+max_trainings_in_parallel = 20
 
 
 class Config(eqx.Module):
@@ -363,21 +366,51 @@ def schedule_runs(
 
 
 if __name__ == "__main__":
-    experiment = "23"
-    N = 50
-    hardnesses = [5, 6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32]
-    ens_sizes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32]
-    print(f"{len(hardnesses) * len(ens_sizes) // 12} hours ish")
+    experiment = "24"
+    N = 40
+
+    hardnesses = [6, 7, 8, 9, 10, 12, 14, 16, 20, 24, 28, 32]
+    ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 26, 32]
+
+    all_specs = [(x, y) for x, y in itertools.product(hardnesses, ens_sizes)]
+    random.seed(42)
+    random.shuffle(all_specs)
+
+    est_time = lambda h, k, n: (h * h * k / 100 + k / 1.2) * n / 250  # time in minutes to complete
+
+    def n_rule(h, k):
+        if k <= 5 and h <= 14:
+            return N * 10
+        if k >= 10 or h >= 10:
+            return N // 2
+        return N
+
+    total = 0.0
+    for h, k in all_specs:
+        total += est_time(h, k, n_rule(h, k))
+    print(f"{2 * total / 60:.2f} hours")
+
+    time_records = []
+    tfilehash = int(time.time()) % 1_000_000
     for kind in ["boot", "bootrp"]:
-        for hardness in [21]:
-            for ensemble_size in range(16, 32):
-                schedule_runs(
-                    N,
-                    cfg=Config(
-                        kind=kind,
-                        num_episodes=50_000,
-                        ensemble_size=ensemble_size,
-                        hardness=hardness,
-                    ),
-                    output_root=f"results/{experiment}",
-                )
+        for hardness, ensemble_size in all_specs:
+            n = n_rule(hardness, ensemble_size)
+            t0 = time.time()
+            schedule_runs(
+                n,
+                cfg=Config(
+                    kind=kind,
+                    num_episodes=50_000,
+                    ensemble_size=ensemble_size,
+                    hardness=hardness,
+                ),
+                output_root=f"results/{experiment}",
+            )
+            took = (time.time() - t0) / 60
+            print(
+                f"(h={hardness}, K={ensemble_size}) was expected to take {est_time(hardness, ensemble_size, N):.2f} minutes, and actually took {took:.2f} minutes"
+            )
+            time_records.append(
+                {"h": hardness, "k": ensemble_size, "t": took, "kind": kind, "N": n}
+            )
+            pd.DataFrame(time_records).to_csv(f"time_records_{tfilehash}.csv")
