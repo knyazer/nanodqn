@@ -72,8 +72,11 @@ def tree_diff(pytree_a, pytree_b):
 
 class MagicModel(Model):
     anchor: Model
+    psi: Any
 
-    def __init__(self, observation_size, action_size, /, key, layer_sizes=None):
+    def __init__(self, observation_size, action_size, /, key, layer_sizes=None, psi=None):
+        assert psi is not None
+        self.psi = psi
         k1, k2 = jr.split(key)
         super().__init__(observation_size, action_size, key=k1, layer_sizes=layer_sizes)
 
@@ -84,7 +87,7 @@ class MagicModel(Model):
 
     def self_loss(self):
         # lower is better
-        return -1e-2 * tree_diff(
+        return jax.lax.stop_gradient(self.psi) * tree_diff(
             eqx.filter(self.layers, eqx.is_inexact_array),
             jax.lax.stop_gradient(eqx.filter(self.anchor.layers, eqx.is_inexact_array)),
         )

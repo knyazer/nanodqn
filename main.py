@@ -40,12 +40,13 @@ max_trainings_in_parallel = 10
 class Config(eqx.Module):
     batch_size: int = 128
     lr: float = 2e-4
+    psi: float = -1e-2
     envs_per_member: int = 8
     ensemble_size: int = 4
     prior_scale: float = 3
     env_name: str = "DeepSea-bsuite"
     kind: str = "dqn"
-    hardness: int = 12
+    hardness: int = 24
     randomize_actions: bool = True
     num_episodes: int = 10_000
 
@@ -58,8 +59,8 @@ class Config(eqx.Module):
     def __str__(self):
         return f"{self.kind}({self.ensemble_size})_{self.env_name}({self.hardness})_beta{self.prior_scale}"
 
-    def short_str(self):
-        return str(self)
+    def unique_str(self):
+        return str(self) + f"_{self.autoseed()}"
 
 
 @eqx.filter_jit
@@ -101,7 +102,7 @@ def main(key=None, cfg=Config(), debug=False):
     if cfg.kind == "boot":
         model = Bootstrapped(
             action_space=action_space,
-            model_factory=lambda k: MagicModel(obs_size, act_size, key=k),
+            model_factory=lambda k: MagicModel(obs_size, act_size, key=k, psi=cfg.psi),
             ensemble_size=cfg.ensemble_size,
             key=model_key,
         )
@@ -151,7 +152,7 @@ def main(key=None, cfg=Config(), debug=False):
         )
 
     key, _ = jr.split(key, 2)
-    optim = optax.adam(cfg.lr * cfg.ensemble_size)
+    optim = optax.adamw(cfg.lr * cfg.ensemble_size)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
 
     @eqx.filter_jit(donate="all-except-first")
@@ -322,7 +323,7 @@ def schedule_runs(
 ):
     # This function just reports results in a nice format
     VERSION = 1
-    run_name_base = f"{cfg.short_str()}"
+    run_name_base = f"{cfg.unique_str()}"
     run_name = run_name_base
     folder_path = Path(output_root) / run_name
 
@@ -333,7 +334,7 @@ def schedule_runs(
     results = []
     thresh = 0.95
 
-    tqdm.write(f"Starting the run scheduler with {cfg.short_str()}, N={N}")
+    tqdm.write(f"Starting the run scheduler with {cfg.unique_str()}, N={N}")
 
     starting_seed = cfg.autoseed()
     keys = jr.split(jr.key(starting_seed), N)
@@ -386,15 +387,19 @@ def schedule_runs(
 
 
 if __name__ == "__main__":
-    experiment = "19"
-    N = 20
-    for hardness in [20, 32]:
-        for ens_size in [5, 10]:
-            for kind in ["boot", "bootrp"]:  # ["boot", "bootrp"]:
+    experiment = "22"
+    N = 10
+    for hardness in [36]:
+        for ensemble_size in [10, 20]:
+            for beta in [3.0, 5.0]:
                 schedule_runs(
                     N,
                     cfg=Config(
-                        kind=kind, num_episodes=40_000, ensemble_size=ens_size, hardness=hardness
+                        kind="bootrp",
+                        num_episodes=50_000,
+                        ensemble_size=ensemble_size,
+                        hardness=hardness,
+                        prior_scale=beta,
                     ),
                     output_root=f"results/{experiment}",
                 )

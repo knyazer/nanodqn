@@ -116,6 +116,8 @@ def make_agg(version):
                 "ensemble_size": cfg.ensemble_size,
                 "hardness": cfg.hardness,
                 "kind": cfg.kind,
+                "psi": cfg.psi,
+                "prior_scale": cfg.prior_scale,
             }
         )
     return pd.DataFrame(agg)
@@ -289,7 +291,7 @@ def plot14(agg: pd.DataFrame):
 
 
 if __name__ == "__main__":
-    agg = make_agg("19")
+    agg = make_agg("22")
     # plot14(agg)
 
     kinds = ["boot", "bootrp"]
@@ -297,13 +299,17 @@ if __name__ == "__main__":
     print(kinds)
     for hardness in sorted(agg["hardness"].unique()):
         for ens_size in sorted(agg["ensemble_size"].unique()):
-            df = agg.query(f"hardness == {hardness} and ensemble_size == {ens_size}")
-            print(f"hardness={hardness},K={ens_size}: \t", end="")
-            for kind in kinds:
-                fdf = df.loc[df["kind"] == kind, "weak_convergence"]
-                v = fdf.iloc[0] if not fdf.empty else None
-                if v is not None:
-                    print(f"{f'{v:.3f}':<10}", end="\t")
-                else:
-                    print(f"{'undefined':<10}", end="\t")
-            print()
+            for beta in sorted(agg["prior_scale"].unique()):
+                for psi in sorted(agg["psi"].unique()):
+                    df = agg.query(
+                        f"hardness == {hardness} and ensemble_size == {ens_size} and prior_scale == {beta} and psi == {psi}"
+                    )
+                    print(f"hardness={hardness},K={ens_size},beta={beta},psi={psi}: \t", end="")
+                    for kind in kinds:
+                        fdf = df.loc[df["kind"] == kind, "mean_time_to_weak"]
+                        v = fdf.iloc[0] if not fdf.empty else None
+                        if v is not None:
+                            print(f"{f'{v:.3f}':<10}", end="\t")
+                        else:
+                            print(f"{'undefined':<10}", end="\t")
+                    print()
