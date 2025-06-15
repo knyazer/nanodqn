@@ -140,11 +140,13 @@ def plot_heatmap():
         interpolated_data = (
             uniform_df.interpolate(method="nearest", limit_direction="both", axis=0).ffill().bfill()
         )
+        """
         interpolated_data = (
             interpolated_data.interpolate(method="nearest", limit_direction="both", axis=1)
             .ffill()
             .bfill()
         )
+        """
 
         sns.heatmap(
             interpolated_data,
