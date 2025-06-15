@@ -397,24 +397,27 @@ def schedule_runs(
 
 
 def exp_heatmap():
-    experiment = "heatmap"
+    experiment = "heatmap24"
     N = 32
 
     hardness_resolution = 2
-    hardnesses = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] + list(
-        range(16, 51, hardness_resolution)
+    hardnesses = (
+        [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        + list(range(14, 32, hardness_resolution))
+        + list(range(32, 49, hardness_resolution * 2))  # last value is h=48
     )
-    ens_sizes = [1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 50]
+    ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40]
 
     all_specs = [(x, y) for x, y in itertools.product(ens_sizes, hardnesses)]
 
     skip_counter = 0
     last_full_hardness = 0
     for kind in ["bootrp", "boot"]:
+        last_full_hardness = 0
         for ensemble_size, hardness in tqdm(all_specs, position=1):
             if hardness == min(hardnesses):
                 skip_counter = 0
-            if skip_counter >= 2:
+            if skip_counter >= 1:
                 continue
             if hardness < last_full_hardness:
                 continue
