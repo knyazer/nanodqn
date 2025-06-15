@@ -1,27 +1,29 @@
 [project]
 name = "nanodqn"
-version = "0.2.0"
-description = "DQN in JAX+Equinox and jaxtyping"
+version = "0.3.0"
+authors = [{ name="Roman Knyazhitskiy", email="dqn.scaling.laws@knyaz.tech" }]
+license = "MIT"
+description = "An implementation for DQN Scaling Laws BSc Thesis"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "wandb",
-    "flax",
-    "jax[cuda12]<0.6", # nvidia support by default
+    "jax[cuda12]", # nvidia support by default
     "optax",
-    "gymnasium[classic-control]<1",
-    "numpy<2", # cuz stable baselines3 die otherwise
-    "tyro",
     "tqdm",
-    "moviepy", # videos
-    "hydra-core>=1.3.0",
-    "omegaconf>=2.3.0",
-    "equinox>=0.12.2",
-    "jaxtyping>=0.3.2",
-    "pillow>=10.4.0",
-    "flashbax>=0.1.3",
-    "scipy>=1.15.2",
-    "seaborn>=0.13.2",
+    "equinox",
+    "jaxtyping",
+    "pillow",
+    "seaborn",
+    "gymnax",
+]
+classifiers = [
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
 
@@ -29,4 +31,4 @@ dependencies = [
 line-length = 100
 
 [tool.uv.sources]
-gymnax = { path = "gymnax" }
+gymnax = { git = "https://github.com/knyazer/gymnax", branch = "equiv" }

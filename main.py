@@ -35,19 +35,19 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
-max_trainings_in_parallel = 8 * jax.device_count()
+max_trainings_in_parallel = 64 * jax.device_count()
 
 
 class Config(eqx.Module):
-    batch_size: int = 128
-    lr: float = 3e-4
+    batch_size: int = 64
+    lr: float = 2e-4
     num_envs: int = 24
     ensemble_size: int = 4
     prior_scale: float = 3
     env_name: str = "DeepSea-bsuite"
     kind: str = "boot"
     hardness: int = 24
-    randomize_actions: bool = True  # environment, don't switch to False unless you are _very_ sure
+    randomize_actions: bool = True  # don't switch to False unless you are _very_ sure
     num_episodes: int = 10_000
     rb_size: int = 10_000
 
@@ -237,7 +237,7 @@ def main(key=None, cfg=Config(), debug=False):
         def episode_done(rews, model_indices, j):
             # in case an episode is completed we set the reward to an observed one,
             # and choose a new model index for the episode
-            model_indices = model_indices.at[j].set(jr.randint(d_key[j], (), 0, ensemble_size))
+            model_indices = model_indices.at[j].set(jr.randint(d_key[j], (), 0, cfg.ensemble_size))
             rews = rews.at[j].set(0)
             return rews, model_indices
 
@@ -376,8 +376,8 @@ def schedule_runs(
     return results
 
 
-if __name__ == "__main__":
-    experiment = "26"
+def exp_heatmap():
+    experiment = "heatmap"
     N = 64
 
     hardness_resolution = 2
@@ -386,44 +386,21 @@ if __name__ == "__main__":
 
     all_specs = [(x, y) for x, y in itertools.product(ens_sizes, hardnesses)]
 
-    def est_time(k, h, n):
-        k *= 3
-        return (
-            8.28642e-04 * h
-            - 2.48254e-04 * h * k
-            + 1.28879e-05 * h**2
-            + 3.12066e-04 * k**2
-            + 4.42015e-05 * h**2 * k
-            - 4.09876e-05 * h * k**2
-            + 9.31602e-07 * h**2 * k**2
-        ) * n  # fitted using lasso
-
     def n_rule(k, h):
         return N
 
-    total = 0.0
-    for k, h in all_specs:
-        total += est_time(k, h, n_rule(k, h))
-    print(f"{2 * total / 60:.2f} hours")
-
-    time_records = []
-    tfilehash = int(time.time()) % 1_000_000
     skip_counter = 0
     last_full_hardness = 0
     for kind in ["boot"]:
         for ensemble_size, hardness in tqdm(all_specs, position=1):
             if hardness == min(hardnesses):
                 skip_counter = 0
-            if skip_counter >= 2:
+            if skip_counter >= 1:
                 continue
             if hardness <= last_full_hardness - 2 * hardness_resolution:
                 continue
             n = n_rule(ensemble_size, hardness)
-            print(
-                f"Next run is expected to take {est_time(ensemble_size, hardness, n):.1f} minutes..."
-            )
 
-            t0 = time.time()
             results = schedule_runs(
                 n,
                 cfg=Config(
@@ -434,11 +411,6 @@ if __name__ == "__main__":
                 ),
                 output_root=f"results/{experiment}",
             )
-            took = (time.time() - t0) / 60
-            time_records.append(
-                {"h": hardness, "k": ensemble_size, "t": took, "kind": kind, "N": n}
-            )
-            pd.DataFrame(time_records).to_csv(f"aux_results/time_records_{tfilehash}.csv")
 
             if results is not None:
                 if results["weak_convergence"].sum() == 0:
@@ -448,3 +420,7 @@ if __name__ == "__main__":
 
                 if results["weak_convergence"].sum() == 1:
                     last_full_hardness = hardness
+
+
+if __name__ == "__main__":
+    exp_heatmap()

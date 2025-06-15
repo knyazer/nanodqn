@@ -140,72 +140,7 @@ def ax_set_log_scale(ax, m1=False):
         ax.set_yscale("log")
 
 
-def plot14(agg: pd.DataFrame):
-    # Rename if needed
-    if "weak_convergence" in agg.columns and "weak_probability" not in agg.columns:
-        agg = agg.rename(columns={"weak_convergence": "weak_probability"})
-
-    # Sorted unique K and n
-    Ks = sorted(agg["ensemble_size"].unique())
-    ns = sorted(agg["hardness"].unique())
-
-    # 1. Fixed K: vs n
-    fig1, axes1 = plt.subplots((len(Ks) + 2) // 3, 3, figsize=(15, 15))
-    axes1 = axes1.flatten()
-    for i, K in enumerate(Ks):
-        ax = axes1[i]
-        set_scale(ax)
-        subdf = agg[agg["ensemble_size"] == K]
-        # Empirical
-        for kind in subdf["kind"].unique():
-            pdf = subdf[subdf["kind"] == kind].sort_values(by="hardness")
-            ax.plot(
-                pdf["hardness"], pdf["weak_probability"], marker="o", label=f"empirical ({kind})"
-            )
-        # Theoretical
-        plot_theoretical(ax, ns, K, True)
-        ax.set_title(f"K={K}")
-        ax.set_xlabel("hardness (n)")
-        ax.set_ylabel("weak_probability")
-        ax.grid(True)
-        ax.legend(fontsize="small", ncol=2)
-    fig1.suptitle("Weak Probability vs. n (fixed K)")
-    plt.tight_layout()
-    plt.subplots_adjust(top=0.92)
-    fig1.savefig("plots/14_a.svg")
-    fig1.savefig("plots/png/14_a.png", dpi=300)
-    plt.close(fig1)
-
-    # 2. Fixed n: vs K
-    fig2, axes2 = plt.subplots((len(ns) + 2) // 3, 3, figsize=(15, 15))
-    axes2 = axes2.flatten()
-    for i, n_val in enumerate(ns):
-        ax = axes2[i]
-        set_scale(ax, True)
-        subdf = agg[agg["hardness"] == n_val]
-        for kind in subdf["kind"].unique():
-            pdf = subdf[subdf["kind"] == kind].sort_values(by="ensemble_size")
-            ax.plot(
-                pdf["ensemble_size"],
-                pdf["weak_probability"],
-                marker="o",
-                label=f"empirical ({kind})",
-            )
-        plot_theoretical(ax, Ks, n_val, False)
-        ax.set_title(f"hardness={n_val}")
-        ax.set_xlabel("ensemble size (K)")
-        ax.set_ylabel("weak_probability")
-        ax.grid(True)
-        ax.legend(fontsize="small", ncol=2)
-    fig2.suptitle("Weak Probability vs. K (fixed n)")
-    plt.tight_layout()
-    plt.subplots_adjust(top=0.92)
-    fig2.savefig("plots/14_b.svg")
-    fig2.savefig("plots/png/14_b.png", dpi=300)
-    plt.close(fig2)
-
-
-def plot_heatmaps():
+def plot_heatmap():
     agg = make_agg("24")
     cmap = sns.color_palette("Blues", as_cmap=True)
     kinds = ["boot"]  # , "bootrp"] # For simplicity, let's just run one for the example
@@ -259,18 +194,14 @@ def plot_heatmaps():
     cbar = fig.colorbar(mappable, ax=axes, shrink=0.75, pad=0.03)
     cbar.set_label("Probability of Convergence", rotation=270, labelpad=20)
 
-    plot_save("heatmaps")
+    plot_save("heatmap")
     plt.show()
 
 
-if __name__ == "__main__":
-    plot_heatmaps()
-
-    agg = make_agg("24")
-    # plot14(agg)
+def log(name):
+    agg = make_agg(name)
 
     kinds = ["boot", "bootrp"]
-
     print(kinds)
     for hardness in sorted(agg["hardness"].unique()):
         for ens_size in sorted(agg["ensemble_size"].unique()):
@@ -284,3 +215,9 @@ if __name__ == "__main__":
                 else:
                     print(f"{'undefined':<10}", end="\t")
             print()
+
+
+if __name__ == "__main__":
+    plot_heatmap()
+
+    log("heatmap")
