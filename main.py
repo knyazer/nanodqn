@@ -212,6 +212,30 @@ def main(key=None, cfg=Config(), debug=False):
     if debug:
         jax.debug.print("Filled out the replay buffer. Starting training.")
 
+    def w_diff(model):
+        leaves = eqx.filter(model, eqx.is_inexact_array)
+
+        def leaf_stats(a):
+            if (not eqx.is_inexact_array(a)) or len(a.shape) == 0 or (m := a.shape[0]) < 2:
+                return 0.0, 0
+            flat = a.reshape(m, -1)  # (m, d)
+            sum_x = jnp.sum(flat, axis=0)  # (d,)
+            sum_x2 = jnp.sum(flat**2, axis=0)  # (d,)
+            pair = (a[0] - a[1]) ** 2  # (d,)
+            return jnp.sum(pair), pair.size
+
+        def wrap_fn(acc, x):
+            v, sz = leaf_stats(x)
+            return acc[0] + v, acc[1] + sz
+
+        pair_sum, count = jax.tree_util.tree_reduce(
+            wrap_fn,
+            leaves,
+            initializer=(0.0, 0),
+        )
+
+        return jnp.sqrt(pair_sum / count) if count else 0.0
+
     @eqx.filter_jit(donate="all")
     def inner_loop(model, rb, obs, state, model_indices, opt_state, key, rews, i):
         progress = jnp.clip(i / num_steps, 0.0, 1.0)
@@ -230,6 +254,7 @@ def main(key=None, cfg=Config(), debug=False):
             "qval": train_info[0].mean(),
             "qtarget": train_info[1].mean(),
             "tdloss": train_info[2].mean(),
+            "w_diff": w_diff(model),
             "train_reward": jnp.where(dones, rews, jnp.nan),
             "model_indices": model_indices,
         }
@@ -309,8 +334,7 @@ def schedule_runs(
 
     if folder_path.exists():
         print(f"{folder_path} exists hence skipping")
-        return
-
+        return pd.read_csv(folder_path / "results.csv")
     results = []
     thresh = 0.95
 
@@ -336,7 +360,9 @@ def schedule_runs(
                 jax.debug.visualize_array_sharding(ckeys)
         _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg))(ckeys)
 
-        for tr, m_indices in zip(logs["train_reward"], logs["model_indices"]):
+        for tr, m_indices, w_diff in zip(
+            logs["train_reward"], logs["model_indices"], logs["w_diff"]
+        ):
             tr = np.array(tr)
             mask = np.logical_not(np.isnan(tr))
             tr, m_indices = tr[mask], m_indices[mask]
@@ -358,6 +384,7 @@ def schedule_runs(
                 {
                     "weak_convergence": weak_convergence,
                     "time_to_weak": time_to_weak,
+                    "weight_space_distance": w_diff,
                     "strong_convergence": strong_convergence,
                     "time_to_strong": time_to_strong,
                 }
@@ -377,12 +404,12 @@ def schedule_runs(
 
 
 def exp_heatmap():
-    experiment = "heatmap"
-    N = 64
+    experiment = "heatmap2"
+    N = 32
 
-    hardness_resolution = 2
-    hardnesses = list(range(6, 41, hardness_resolution))
-    ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 28, 32, 36, 40]
+    hardness_resolution = 4
+    hardnesses = [6, 7, 8, 10, 12, 14] + list(range(16, 41, hardness_resolution))
+    ens_sizes = [4, 6, 10, 16, 24, 32, 40]
 
     all_specs = [(x, y) for x, y in itertools.product(ens_sizes, hardnesses)]
 
@@ -395,9 +422,9 @@ def exp_heatmap():
         for ensemble_size, hardness in tqdm(all_specs, position=1):
             if hardness == min(hardnesses):
                 skip_counter = 0
-            if skip_counter >= 2:
+            if skip_counter >= 1:
                 continue
-            if hardness <= last_full_hardness - 2 * hardness_resolution:
+            if hardness < last_full_hardness:
                 continue
             n = n_rule(ensemble_size, hardness)
 
@@ -405,7 +432,7 @@ def exp_heatmap():
                 n,
                 cfg=Config(
                     kind=kind,
-                    num_episodes=50_000,
+                    num_episodes=10_000,
                     ensemble_size=ensemble_size,
                     hardness=hardness,
                 ),
@@ -416,7 +443,8 @@ def exp_heatmap():
                 if results["weak_convergence"].sum() == 0:
                     skip_counter += 1
 
-                if results["weak_convergence"].sum() == 1:
+                if results["weak_convergence"].mean() == 1:
+                    print(f"Setting new full hardness: {hardness}")
                     last_full_hardness = hardness
 
 

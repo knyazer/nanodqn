@@ -55,58 +55,6 @@ def plot_save(name):
     plt.close()
 
 
-def plot02():
-    agg = make_agg("02")
-    agg = pd.DataFrame(agg)
-    ensemble_sizes = sorted(agg["ensemble_size"].unique())
-    hardnesses = sorted(agg["hardness"].unique())
-
-    plt.figure(figsize=(10, 6))
-    colors = plt.cm.viridis(np.linspace(0, 0.8, len(ensemble_sizes)))
-
-    for i, ensemble_size in enumerate(ensemble_sizes):
-        v = agg.query(f"ensemble_size == {ensemble_size} and kind == 'boot'")
-        if len(v) > 0:
-            sorted_by_hardness = v.set_index("hardness", drop=True).sort_index()
-            weak_arr = sorted_by_hardness["mean_time_to_weak"].array
-            plt.plot(
-                hardnesses,
-                weak_arr,
-                "o-",
-                color=colors[i],
-                label=f"Bootstrap K={ensemble_size}",
-                linewidth=2,
-            )
-
-    v = agg.query("kind == 'dqn'")
-    if len(v) > 0:
-        dqn_weak = v.set_index("hardness", drop=True).sort_index()["mean_time_to_weak"].array
-        plt.plot(
-            hardnesses,
-            dqn_weak,
-            "s--",
-            color="red",
-            label="DQN baseline",
-            linewidth=2,
-            markersize=8,
-        )
-
-    limit = agg["max_time_to_weak"].max()
-    plt.axhline(y=limit, color="gray", linestyle=":", alpha=0.7, label=f"Max time limit ({limit})")
-
-    plt.xlabel("Environment Hardness")
-    plt.ylabel("Mean Time to Weak Convergence")
-    plt.title("Convergence Time vs Environment Hardness")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-
-    Path("plots/png").mkdir(parents=True, exist_ok=True)
-    plt.savefig("plots/02.svg")
-    plt.savefig("plots/png/02.png", dpi=300)
-    plt.close()
-
-
 def make_theoretical(ax, x_values, kind: Literal["slow", "fast"], param: float, K=None, n=None):
     assert K is not None or n is not None
     if kind == "slow":
@@ -141,7 +89,7 @@ def ax_set_log_scale(ax, m1=False):
 
 
 def plot_heatmap():
-    agg = make_agg("24")
+    agg = make_agg("heatmap")
     cmap = sns.color_palette("Blues", as_cmap=True)
     kinds = ["boot"]  # , "bootrp"] # For simplicity, let's just run one for the example
 
@@ -150,7 +98,10 @@ def plot_heatmap():
     for i, kind in enumerate(kinds):
         ax = axes[i]
         df_kind = agg.query(f"kind == '{kind}'")
-
+        duplicates = df_kind[df_kind.duplicated(subset=["ensemble_size", "hardness"], keep=False)]
+        if len(duplicates) != 0:
+            print(duplicates.head(), duplicates["ensemble_size"], duplicates["hardness"])
+            breakpoint()
         pivot_data = df_kind.pivot(
             index="ensemble_size", columns="hardness", values="weak_convergence"
         )
@@ -159,9 +110,9 @@ def plot_heatmap():
         uniform_columns = np.arange(pivot_data.columns.min(), pivot_data.columns.max() + 1)
         uniform_df = pivot_data.reindex(index=uniform_index, columns=uniform_columns)
 
-        interpolated_data = uniform_df.interpolate(method="nearest", limit_direction="both", axis=0)
+        interpolated_data = uniform_df.interpolate(method="nearest", limit_direction="both", axis=1)
         interpolated_data = interpolated_data.interpolate(
-            method="nearest", limit_direction="both", axis=1
+            method="linear", limit_direction="both", axis=0
         )
 
         sns.heatmap(
