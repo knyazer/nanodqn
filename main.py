@@ -34,6 +34,7 @@ jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
+jax.default_matmul_precision("bfloat16")
 
 max_trainings_in_parallel = 32 * jax.device_count()
 
@@ -50,7 +51,6 @@ class Config(eqx.Module):
     randomize_actions: bool = True  # don't switch to False unless you are _very_ sure
     num_episodes: int = 10_000
     rb_size: int = 10_000
-    low_precision: bool = True  # use float32 acc with bfloat16 backward
 
     def autoseed(self):
         cfg_dict = dataclasses.asdict(self)
@@ -140,31 +140,19 @@ def main(key=None, cfg=Config(), debug=False):
 
     @eqx.filter_jit(donate="all-except-first")
     def train(rb, model, opt_state, key):
-        with jax.default_matmul_precision("bfloat16"):
+        def loss_wrap(model, key):
+            key, fkey = jr.split(key)
+            keys = jr.split(fkey, cfg.batch_size * cfg.ensemble_size)
+            samples = rb.sample(key, cfg.batch_size * cfg.ensemble_size)
+            loss, aux = eqx.filter_vmap(model.loss)(keys, samples)
+            return loss.mean(), aux
 
-            def to(tree, dtype):
-                if cfg.low_precision:
-                    return jax.tree.map(
-                        lambda n: n.astype(dtype) if eqx.is_inexact_array(n) else n, tree
-                    )
-                else:
-                    return tree
-
-            def loss_wrap(model, key):
-                key, fkey = jr.split(key)
-                keys = jr.split(fkey, cfg.batch_size * cfg.ensemble_size)
-                samples = to(rb.sample(key, cfg.batch_size * cfg.ensemble_size), jnp.bfloat16)
-                loss, aux = eqx.filter_vmap(model.loss)(keys, samples)
-                return loss.mean(), aux
-
-            (loss, info), grads = eqx.filter_value_and_grad(
-                eqx.Partial(loss_wrap, key=key), has_aux=True
-            )(to(model, jnp.bfloat16))
-            updates, opt_state = optim.update(
-                to(grads, jnp.float32), opt_state, eqx.filter(model, eqx.is_inexact_array)
-            )
-            model = eqx.apply_updates(model, updates)
-            return model, opt_state, (*info, loss)
+        (loss, info), grads = eqx.filter_value_and_grad(
+            eqx.Partial(loss_wrap, key=key), has_aux=True
+        )(model)
+        updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_inexact_array))
+        model = eqx.apply_updates(model, updates)
+        return model, opt_state, (*info, loss)
 
     @eqx.filter_jit(donate="all")
     def step(model, rb, obs_state, key, progress, model_indices):
@@ -408,7 +396,7 @@ def schedule_runs(
 
 
 def exp_heatmap():
-    experiment = "heatmap2"
+    experiment = "heatmap"
     N = 32
 
     hardness_resolution = 4
@@ -453,12 +441,4 @@ def exp_heatmap():
 
 
 if __name__ == "__main__":
-    # exp_heatmap()
-
-    schedule_runs(
-        10,
-        cfg=Config(
-            kind="boot", num_episodes=10_000, ensemble_size=12, hardness=20, low_precision=True
-        ),
-        output_root="results/tmp",
-    )
+    exp_heatmap()
