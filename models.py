@@ -57,9 +57,6 @@ class Model(eqx.Module):
         x = self.layers[-1](x)
         return x
 
-    def self_loss(self):
-        return 0
-
 
 class ModelWithPrior(Model):
     prior: Model
@@ -74,9 +71,6 @@ class ModelWithPrior(Model):
 
     def __call__(self, x):
         return super().__call__(x) + jax.lax.stop_gradient(self.prior(x) * self.scale)
-
-    def self_loss(self):
-        return 0
 
 
 gamma = 0.99
@@ -164,12 +158,6 @@ class Bootstrapped(DQN):
     def __len__(self):
         return self.ensemble_size
 
-    def self_loss(self):
-        loss = 0
-        for idx in range(self.ensemble_size):
-            loss += self[idx].model.self_loss()
-        return loss
-
     def loss(self, key: PRNGKeyArray, sample):
         rkey, subkey, key = jr.split(key, 3)
 
@@ -194,6 +182,13 @@ class Bootstrapped(DQN):
         q_pred = model(sample.observations.squeeze())
         q_pred = q_pred[sample.actions]
         return ((q_pred - next_q_value) ** 2).mean(), (q_pred, next_q_value)
+
+    def q_pred_all(self, sample):
+        vs = []
+        for m_index in range(self.ensemble_size):
+            m = self[m_index]
+            vs.append(eqx.filter_vmap(m.model)(sample.next_observations.squeeze()))
+        return jnp.array(vs)
 
     def action(self, observation: Float[Array, "obs_size"], *_, index=None, **kws):
         assert index is not None

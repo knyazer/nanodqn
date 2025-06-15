@@ -35,7 +35,7 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
-max_trainings_in_parallel = 64 * jax.device_count()
+max_trainings_in_parallel = 32 * jax.device_count()
 
 
 class Config(eqx.Module):
@@ -50,6 +50,7 @@ class Config(eqx.Module):
     randomize_actions: bool = True  # don't switch to False unless you are _very_ sure
     num_episodes: int = 10_000
     rb_size: int = 10_000
+    low_precision: bool = True  # use float32 acc with bfloat16 backward
 
     def autoseed(self):
         cfg_dict = dataclasses.asdict(self)
@@ -90,7 +91,7 @@ def main(key=None, cfg=Config(), debug=False):
     single_obs = obs[0]
     obs_size = single_obs.size
 
-    rb_mask_size = cfg.ensemble_size if ("boot" in cfg.kind or "amc" in cfg.kind) else 1
+    rb_mask_size = cfg.ensemble_size if ("boot" in cfg.kind) else 1
 
     compress_obs = lambda x: (jnp.array([jnp.argmax(x.ravel())]), x.shape)
     decompress_obs = lambda s, x: jnp.zeros(s).at[jnp.unravel_index(x, s)].set(1)
@@ -139,18 +140,31 @@ def main(key=None, cfg=Config(), debug=False):
 
     @eqx.filter_jit(donate="all-except-first")
     def train(rb, model, opt_state, key):
-        key, fkey = jr.split(key)
+        with jax.default_matmul_precision("bfloat16"):
 
-        def loss_wrap(model):
-            keys = jr.split(fkey, cfg.batch_size * cfg.ensemble_size)
-            samples = rb.sample(key, cfg.batch_size * cfg.ensemble_size)
-            loss, aux = eqx.filter_vmap(model.loss)(keys, samples)
-            return loss.mean() + model.self_loss(), aux
+            def to(tree, dtype):
+                if cfg.low_precision:
+                    return jax.tree.map(
+                        lambda n: n.astype(dtype) if eqx.is_inexact_array(n) else n, tree
+                    )
+                else:
+                    return tree
 
-        (loss, info), grads = eqx.filter_value_and_grad(loss_wrap, has_aux=True)(model)
-        updates, opt_state = optim.update(grads, opt_state, eqx.filter(model, eqx.is_inexact_array))
-        model = eqx.apply_updates(model, updates)
-        return model, opt_state, (*info, loss)
+            def loss_wrap(model, key):
+                key, fkey = jr.split(key)
+                keys = jr.split(fkey, cfg.batch_size * cfg.ensemble_size)
+                samples = to(rb.sample(key, cfg.batch_size * cfg.ensemble_size), jnp.bfloat16)
+                loss, aux = eqx.filter_vmap(model.loss)(keys, samples)
+                return loss.mean(), aux
+
+            (loss, info), grads = eqx.filter_value_and_grad(
+                eqx.Partial(loss_wrap, key=key), has_aux=True
+            )(to(model, jnp.bfloat16))
+            updates, opt_state = optim.update(
+                to(grads, jnp.float32), opt_state, eqx.filter(model, eqx.is_inexact_array)
+            )
+            model = eqx.apply_updates(model, updates)
+            return model, opt_state, (*info, loss)
 
     @eqx.filter_jit(donate="all")
     def step(model, rb, obs_state, key, progress, model_indices):
@@ -212,34 +226,13 @@ def main(key=None, cfg=Config(), debug=False):
     if debug:
         jax.debug.print("Filled out the replay buffer. Starting training.")
 
-    def w_diff(model):
-        leaves = eqx.filter(model, eqx.is_inexact_array)
-
-        def leaf_stats(a):
-            if (not eqx.is_inexact_array(a)) or len(a.shape) == 0 or (m := a.shape[0]) < 2:
-                return 0.0, 0
-            flat = a.reshape(m, -1)  # (m, d)
-            sum_x = jnp.sum(flat, axis=0)  # (d,)
-            sum_x2 = jnp.sum(flat**2, axis=0)  # (d,)
-            pair = (a[0] - a[1]) ** 2  # (d,)
-            return jnp.sum(pair), pair.size
-
-        def wrap_fn(acc, x):
-            v, sz = leaf_stats(x)
-            return acc[0] + v, acc[1] + sz
-
-        pair_sum, count = jax.tree_util.tree_reduce(
-            wrap_fn,
-            leaves,
-            initializer=(0.0, 0),
-        )
-
-        return jnp.sqrt(pair_sum / count) if count else 0.0
+    key, subkey = jr.split(key)
+    test_sample = rb.sample(subkey, 128)
 
     @eqx.filter_jit(donate="all")
     def inner_loop(model, rb, obs, state, model_indices, opt_state, key, rews, i):
         progress = jnp.clip(i / num_steps, 0.0, 1.0)
-        key, subkey, train_key, remake_key = jr.split(key, 4)
+        key, subkey, train_key, w_test_key = jr.split(key, 4)
         d_key = jr.split(subkey, cfg.num_envs)
 
         # a single step in all the repeats of the environments
@@ -250,11 +243,13 @@ def main(key=None, cfg=Config(), debug=False):
         model, opt_state, train_info = train(rb, model, opt_state, train_key)
         rews += c_rewards
 
+        preds = model.q_pred_all(test_sample)
+
         _log = {
             "qval": train_info[0].mean(),
             "qtarget": train_info[1].mean(),
             "tdloss": train_info[2].mean(),
-            "w_diff": w_diff(model),
+            "w_diff": preds.std(axis=0).mean(),
             "train_reward": jnp.where(dones, rews, jnp.nan),
             "model_indices": model_indices,
         }
@@ -323,11 +318,20 @@ def main(key=None, cfg=Config(), debug=False):
     return model, logs
 
 
+def compress_to(x, T=100):
+    x = jnp.asarray(x).ravel()
+    N = x.shape[0]
+    xp = jnp.arange(N)
+    xi = jnp.linspace(0, N - 1, T)
+    y = jnp.interp(xi, xp, x)
+    return y
+
+
 def schedule_runs(
     N: int, cfg: Config, output_root: str, concurrent: int = max_trainings_in_parallel
 ):
     # This function just reports results in a nice format
-    VERSION = 1
+    VERSION = 2
     run_name_base = f"{cfg.unique_str()}"
     run_name = run_name_base
     folder_path = Path(output_root) / run_name
@@ -384,7 +388,7 @@ def schedule_runs(
                 {
                     "weak_convergence": weak_convergence,
                     "time_to_weak": time_to_weak,
-                    "weight_space_distance": w_diff,
+                    "weight_space_distance": compress_to(w_diff, 100),
                     "strong_convergence": strong_convergence,
                     "time_to_strong": time_to_strong,
                 }
@@ -408,8 +412,8 @@ def exp_heatmap():
     N = 32
 
     hardness_resolution = 4
-    hardnesses = [6, 7, 8, 10, 12, 14] + list(range(16, 41, hardness_resolution))
-    ens_sizes = [4, 6, 10, 16, 24, 32, 40]
+    hardnesses = [3, 4, 5, 6, 7, 8, 10, 12, 14] + list(range(16, 41, hardness_resolution))
+    ens_sizes = [1, 2, 3, 4, 6, 8, 10, 16, 24, 32, 40, 50]
 
     all_specs = [(x, y) for x, y in itertools.product(ens_sizes, hardnesses)]
 
@@ -432,7 +436,7 @@ def exp_heatmap():
                 n,
                 cfg=Config(
                     kind=kind,
-                    num_episodes=10_000,
+                    num_episodes=50_000,
                     ensemble_size=ensemble_size,
                     hardness=hardness,
                 ),
@@ -449,4 +453,12 @@ def exp_heatmap():
 
 
 if __name__ == "__main__":
-    exp_heatmap()
+    # exp_heatmap()
+
+    schedule_runs(
+        10,
+        cfg=Config(
+            kind="boot", num_episodes=10_000, ensemble_size=12, hardness=20, low_precision=True
+        ),
+        output_root="results/tmp",
+    )
