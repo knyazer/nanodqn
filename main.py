@@ -395,7 +395,7 @@ def exp_heatmap():
         for ensemble_size, hardness in tqdm(all_specs, position=1):
             if hardness == min(hardnesses):
                 skip_counter = 0
-            if skip_counter >= 1:
+            if skip_counter >= 2:
                 continue
             if hardness <= last_full_hardness - 2 * hardness_resolution:
                 continue
@@ -415,8 +415,6 @@ def exp_heatmap():
             if results is not None:
                 if results["weak_convergence"].sum() == 0:
                     skip_counter += 1
-                else:
-                    skip_counter = 0
 
                 if results["weak_convergence"].sum() == 1:
                     last_full_hardness = hardness
