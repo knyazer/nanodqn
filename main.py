@@ -1,3 +1,8 @@
+import os
+
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
+os.environ["XLA_FLAGS"] = "--xla_gpu_force_compilation_parallelism=8"
+
 import itertools
 import equinox as eqx
 import numpy as np
@@ -29,9 +34,7 @@ from models import (
 from jax.sharding import PartitionSpec as P
 from helpers import df_from, df_to
 
-os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
-
-jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
+jax.config.update("jax_compilation_cache_dir", ".jax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
@@ -397,7 +400,7 @@ def schedule_runs(
 
 
 def exp_heatmap():
-    experiment = "heatmap24"
+    experiment = "heatmap24-home"
     N = 32
 
     hardness_resolution = 2
@@ -412,7 +415,7 @@ def exp_heatmap():
 
     skip_counter = 0
     last_full_hardness = 0
-    for kind in ["bootrp", "boot"]:
+    for kind in ["boot", "bootrp"]:
         last_full_hardness = 0
         for ensemble_size, hardness in tqdm(all_specs, position=1):
             if hardness == min(hardnesses):
