@@ -400,7 +400,7 @@ def schedule_runs(
 
 
 def exp_heatmap():
-    experiment = "heatmap24-home"
+    experiment = "heatmap24"
     N = 32
 
     hardness_resolution = 2
