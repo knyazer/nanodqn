@@ -54,7 +54,7 @@ def make_agg(version):
                     "collapse_metric_mean_converged": conv.mean(axis=0),
                     "collapse_metric_std_converged": conv.std(axis=0),
                 }
-            if df["weak_convergence"].prod() != 0:
+            if df["weak_convergence"].prod() == 0:
                 unconv = np.vstack(
                     df[df["weak_convergence"] == False]["collapse_metric"].to_numpy()
                 )
@@ -112,30 +112,36 @@ def ax_set_log_scale(ax, m1=False):
 def plot_heatmap():
     agg = make_agg("heatmap")
     cmap = sns.color_palette("Blues", as_cmap=True)
-    kinds = ["bootrp", "boot"]  # , "bootrp"] # For simplicity, let's just run one for the example
+    kinds = ["boot", "bootrp"]  # , "bootrp"] # For simplicity, let's just run one for the example
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
+
+    max_ens_size = agg["ensemble_size"].max()
+    min_ens_size = agg["ensemble_size"].min()
+
+    max_hardness = agg["hardness"].max()
+    min_hardness = agg["hardness"].min()
 
     for i, kind in enumerate(kinds):
         ax = axes[i]
         df_kind = agg.query(f"kind == '{kind}'")
-        duplicates = df_kind[df_kind.duplicated(subset=["ensemble_size", "hardness"], keep=False)]
+        duplicates = df_kind[df_kind.duplicated(subset=["hardness", "ensemble_size"], keep=False)]
         if len(duplicates) != 0:
             print(duplicates.head(), duplicates["ensemble_size"], duplicates["hardness"])
             breakpoint()
         pivot_data = df_kind.pivot(
-            index="ensemble_size", columns="hardness", values="weak_convergence"
+            index="hardness", columns="ensemble_size", values="weak_convergence"
         )
 
-        uniform_index = np.arange(pivot_data.index.min(), pivot_data.index.max() + 1)
-        uniform_columns = np.arange(pivot_data.columns.min(), pivot_data.columns.max() + 1)
+        uniform_index = np.arange(min_hardness, max_hardness + 1)
+        uniform_columns = np.arange(min_ens_size, max_ens_size + 1)
         uniform_df = pivot_data.reindex(index=uniform_index, columns=uniform_columns)
 
         interpolated_data = (
-            uniform_df.interpolate(method="linear", limit_direction="both", axis=0).ffill().bfill()
+            uniform_df.interpolate(method="nearest", limit_direction="both", axis=0).ffill().bfill()
         )
         interpolated_data = (
-            interpolated_data.interpolate(method="linear", limit_direction="both", axis=1)
+            interpolated_data.interpolate(method="nearest", limit_direction="both", axis=1)
             .ffill()
             .bfill()
         )
@@ -161,9 +167,10 @@ def plot_heatmap():
         )
         ax.set_yticklabels(pivot_data.index.astype(int))
         ax.set_ylabel("Ensemble Size (K)")
+        ax.invert_yaxis()
 
         ax.set_title(f"Kind = '{kind}'")
-        ax.set_xlabel("Hardness (n)")
+        ax.set_ylabel("Hardness (n)")
 
     mappable = ax.collections[0]
     cbar = fig.colorbar(mappable, ax=axes, shrink=0.75, pad=0.03)

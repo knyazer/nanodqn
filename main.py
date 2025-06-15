@@ -400,14 +400,13 @@ def exp_heatmap():
     experiment = "heatmap"
     N = 32
 
-    hardness_resolution = 4
-    hardnesses = [3, 4, 5, 6, 7, 8, 10, 12, 14] + list(range(16, 41, hardness_resolution))
-    ens_sizes = [1, 2, 3, 4, 6, 8, 10, 16, 24, 32, 40, 50]
+    hardness_resolution = 2
+    hardnesses = [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14] + list(
+        range(16, 51, hardness_resolution)
+    )
+    ens_sizes = [1, 2, 3, 4, 5, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 50]
 
     all_specs = [(x, y) for x, y in itertools.product(ens_sizes, hardnesses)]
-
-    def n_rule(k, h):
-        return N
 
     skip_counter = 0
     last_full_hardness = 0
@@ -415,14 +414,13 @@ def exp_heatmap():
         for ensemble_size, hardness in tqdm(all_specs, position=1):
             if hardness == min(hardnesses):
                 skip_counter = 0
-            if skip_counter >= 1:
+            if skip_counter >= 2:
                 continue
             if hardness < last_full_hardness:
                 continue
-            n = n_rule(ensemble_size, hardness)
 
             results = schedule_runs(
-                n,
+                N,
                 cfg=Config(
                     kind=kind,
                     num_episodes=50_000,
