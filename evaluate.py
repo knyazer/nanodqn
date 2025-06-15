@@ -4,87 +4,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import dataclasses
 from scipy.stats import binomtest
+import seaborn as sns
 import yaml
+import functools as ft
+from typing import Literal
 
 
-def plot04():
-    postfix = "04"
-    root = Path(f"results/{postfix}")
-    files = sorted(root.rglob("*.csv"))
-
-    K, p, lo, hi = [], [], [], []
-    base_p = base_lo = base_hi = None
-    means = {}
-
-    for f in files:
-        df = pd.read_csv(f)
-        phat = df["weak_convergence"].mean()
-        ci = binomtest(df["weak_convergence"].sum(), len(df)).proportion_ci(method="exact")
-        if "_dqn" in str(f) and base_p is None:
-            base_p, base_lo, base_hi = phat, ci.low, ci.high
-            means[1] = df["time_to_weak"].mean()
-        elif "_boot" in str(f):
-            k = int(str(f).split("boot")[1].split("_")[0][1:-1])
-            K.append(k)
-            p.append(phat)
-            lo.append(ci.low)
-            hi.append(ci.high)
-            means[k] = df["time_to_weak"].mean()
-        else:
-            print(f"{f} is not a good path for plot04")
-
-    if base_p is None:
-        raise RuntimeError("no dqn baseline found")
-
-    K.append(1)
-    p.append(base_p)
-    lo.append(base_lo)
-    hi.append(base_hi)
-
-    K = np.array(K)
-    p = np.array(p)
-    lo = np.array(lo)
-    hi = np.array(hi)
-    idx = np.argsort(K)
-    K, p, lo, hi = K[idx], p[idx], lo[idx], hi[idx]
-
-    pred = 1 - (1.0 - 0.007) ** K
-
-    fig, axes = plt.subplots(1, 3, figsize=(12, 5))
-
-    # linear plot
-    axes[0].fill_between(K, lo, hi, alpha=0.3)
-    axes[0].plot(K, p, "o-", label="empirical $p_{weak}$")
-    axes[0].plot(K, pred, "s--", label=r"$1 - (1 - p_{weak,dqn})^K$")
-    axes[0].set_xlabel("$K$ (ensemble size)")
-    axes[0].set_ylabel("Weak convergence probability")
-    axes[0].legend()
-    axes[0].grid(True)
-
-    axes[1].fill_between(K, lo, hi, alpha=0.3)
-    axes[1].plot(K, p, "o-", label="empirical $1 - p_{weak}$")
-    axes[1].plot(K, pred, "s--", label=r"$1 - (1 - p_{weak,dqn})^K$")
-
-    axes[1].set_xlabel("$K$ (ensemble size)")
-    axes[1].set_ylabel("Weak convergence log probability")
-    axes[1].legend()
-    axes[1].set_yscale("log")
-    axes[1].grid(True)
-
-    means_arr = []
-    for key in sorted(means.keys()):
-        means_arr.append(float(means[key]))
-    axes[2].plot(sorted(means.keys()), means_arr)
-    axes[2].grid(True)
-
-    plt.tight_layout()
-
-    Path("plots/png").mkdir(parents=True, exist_ok=True)
-    plt.savefig(f"plots/{postfix}.svg")
-    plt.savefig(f"plots/png/{postfix}.png", dpi=300)
-    plt.close()
-
-
+@ft.lru_cache
 def load(path: str | Path):
     folder = Path(path)
     with open(folder / ".version") as f:
@@ -100,6 +26,7 @@ def load(path: str | Path):
     return df, cfg_instance
 
 
+@ft.lru_cache
 def make_agg(version):
     root = Path(f"results/{version}")
     paths = sorted(root.glob("*"))
@@ -111,16 +38,21 @@ def make_agg(version):
                 "mean_time_to_weak": df["time_to_weak"].mean(),
                 "max_time_to_weak": df["time_to_weak"].max(),
                 "mean_time_to_strong": df["time_to_strong"].mean(),
-                "weak_convergence": ((df["time_to_weak"] != df["time_to_weak"].max()).sum())
-                / len(df),
+                "weak_convergence": df["weak_convergence"].sum() / len(df),
                 "ensemble_size": cfg.ensemble_size,
                 "hardness": cfg.hardness,
                 "kind": cfg.kind,
-                "psi": cfg.psi,
                 "prior_scale": cfg.prior_scale,
             }
         )
     return pd.DataFrame(agg)
+
+
+def plot_save(name):
+    Path("plots/png").mkdir(parents=True, exist_ok=True)
+    plt.savefig(f"plots/{name}.svg")
+    plt.savefig(f"plots/png/{name}.png", dpi=600)
+    plt.close()
 
 
 def plot02():
@@ -175,37 +107,37 @@ def plot02():
     plt.close()
 
 
-SLOW_CURVE = False
-LOG_SCALE = False
-
-
-def plot_theoretical(ax, x_values, K_or_n, is_fixed_K, slow=SLOW_CURVE):
-    cmap = plt.get_cmap("plasma")
-    if slow:
-        betas = np.linspace(0.68, 0.8, 4)
-        colors = cmap(np.linspace(0, 1, len(betas)))
-        for beta, color in zip(betas, colors):
-            if is_fixed_K:
-                # x_values are n, fixed K_or_n = K
-                y = [1 - (1 - beta**n_val) ** K_or_n for n_val in x_values]
-            else:
-                # x_values are K, fixed K_or_n = n
-                y = [1 - (1 - beta**K_or_n) ** K_val for K_val in x_values]
-            label = f"$1 - (1 - {beta:.2f}^n)^K$"
-            ax.plot(x_values, y, linestyle="--", color=color, label=label)
+def make_theoretical(ax, x_values, kind: Literal["slow", "fast"], param: float, K=None, n=None):
+    assert K is not None or n is not None
+    if kind == "slow":
+        if K is not None:
+            y = [1 - (1 - param**n_val) ** K for n_val in x_values]
+        else:
+            y = [1 - (1 - param**n) ** K_val for K_val in x_values]
+        label = f"$1 - (1 - {param:.3f}^n)^K$"
     else:
-        betas = np.linspace(0.4, 0.6, 4)
-        colors = cmap(np.linspace(0, 1, len(betas)))
-        for beta, color in zip(betas, colors):
-            if is_fixed_K:
-                # x_values are n, fixed K_or_n = K
-                y = [(1 - beta**K_or_n) ** n_val for n_val in x_values]
-            else:
-                # x_values are K, fixed K_or_n = n
-                y = [(1 - beta**K_val) ** K_or_n for K_val in x_values]
+        if K is not None:
+            y = [1 - (1 - param**K) ** n_val for n_val in x_values]
+        else:
+            y = [1 - (1 - param**K_val) ** n for K_val in x_values]
 
-            label = f"$(1 - {beta:.2f}^n)^K$"
-            ax.plot(x_values, y, linestyle="--", color=color, label=label)
+        label = f"$(1 - {beta:.2f})^K)^n$"
+    return y, label
+
+
+def ax_set_log_scale(ax, m1=False):
+    def forward_log_1m(x):
+        return np.where(x == 1, -1_000, np.log(1 - x))
+
+    def inverse_log_1m(x):
+        return 1 - np.exp(x)
+
+    ax.set_ylim([0.01, 0.99])
+    if m1:
+        # ax.set_yscale("log")
+        ax.set_yscale("function", functions=(forward_log_1m, inverse_log_1m))
+    else:
+        ax.set_yscale("log")
 
 
 def plot14(agg: pd.DataFrame):
@@ -216,23 +148,6 @@ def plot14(agg: pd.DataFrame):
     # Sorted unique K and n
     Ks = sorted(agg["ensemble_size"].unique())
     ns = sorted(agg["hardness"].unique())
-
-    def forward_log_1m(x):
-        return np.where(x == 1, -1_000, np.log(1 - x))
-
-    def inverse_log_1m(x):
-        return 1 - np.exp(x)
-
-    def set_scale(ax, inverted=False):
-        if LOG_SCALE:
-            ax.set_ylim([0.01, 0.99])
-            if inverted:
-                # ax.set_yscale("log")
-                ax.set_yscale("function", functions=(forward_log_1m, inverse_log_1m))
-            else:
-                ax.set_yscale("log")
-        else:
-            pass
 
     # 1. Fixed K: vs n
     fig1, axes1 = plt.subplots((len(Ks) + 2) // 3, 3, figsize=(15, 15))
@@ -290,8 +205,68 @@ def plot14(agg: pd.DataFrame):
     plt.close(fig2)
 
 
+def plot_heatmaps():
+    agg = make_agg("24")
+    cmap = sns.color_palette("Blues", as_cmap=True)
+    kinds = ["boot"]  # , "bootrp"] # For simplicity, let's just run one for the example
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
+
+    for i, kind in enumerate(kinds):
+        ax = axes[i]
+        df_kind = agg.query(f"kind == '{kind}'")
+
+        pivot_data = df_kind.pivot(
+            index="ensemble_size", columns="hardness", values="weak_convergence"
+        )
+
+        uniform_index = np.arange(pivot_data.index.min(), pivot_data.index.max() + 1)
+        uniform_columns = np.arange(pivot_data.columns.min(), pivot_data.columns.max() + 1)
+        uniform_df = pivot_data.reindex(index=uniform_index, columns=uniform_columns)
+
+        interpolated_data = uniform_df.interpolate(method="nearest", limit_direction="both", axis=0)
+        interpolated_data = interpolated_data.interpolate(
+            method="nearest", limit_direction="both", axis=1
+        )
+
+        sns.heatmap(
+            interpolated_data,
+            ax=ax,
+            cmap=cmap,
+            vmin=0,
+            vmax=1.0,
+            cbar=False,
+            xticklabels=False,
+            yticklabels=False,
+        )
+
+        ax.set_xticks(
+            np.interp(pivot_data.columns, uniform_columns, np.arange(len(uniform_columns))) + 0.5
+        )
+        ax.set_xticklabels([f"{x}" for x in pivot_data.columns])
+
+        if i == 0:
+            ax.set_yticks(
+                np.interp(pivot_data.index, uniform_index, np.arange(len(uniform_index))) + 0.5
+            )
+            ax.set_yticklabels(pivot_data.index.astype(int))
+            ax.set_ylabel("Ensemble Size (K)")
+
+        ax.set_title(f"Kind = '{kind}'")
+        ax.set_xlabel("Hardness (n)")
+
+    mappable = ax.collections[0]
+    cbar = fig.colorbar(mappable, ax=axes, shrink=0.75, pad=0.03)
+    cbar.set_label("Probability of Convergence", rotation=270, labelpad=20)
+
+    plot_save("heatmaps")
+    plt.show()
+
+
 if __name__ == "__main__":
-    agg = make_agg("22")
+    plot_heatmaps()
+
+    agg = make_agg("24")
     # plot14(agg)
 
     kinds = ["boot", "bootrp"]
@@ -299,17 +274,13 @@ if __name__ == "__main__":
     print(kinds)
     for hardness in sorted(agg["hardness"].unique()):
         for ens_size in sorted(agg["ensemble_size"].unique()):
-            for beta in sorted(agg["prior_scale"].unique()):
-                for psi in sorted(agg["psi"].unique()):
-                    df = agg.query(
-                        f"hardness == {hardness} and ensemble_size == {ens_size} and prior_scale == {beta} and psi == {psi}"
-                    )
-                    print(f"hardness={hardness},K={ens_size},beta={beta},psi={psi}: \t", end="")
-                    for kind in kinds:
-                        fdf = df.loc[df["kind"] == kind, "mean_time_to_weak"]
-                        v = fdf.iloc[0] if not fdf.empty else None
-                        if v is not None:
-                            print(f"{f'{v:.3f}':<10}", end="\t")
-                        else:
-                            print(f"{'undefined':<10}", end="\t")
-                    print()
+            df = agg.query(f"hardness == {hardness} and ensemble_size == {ens_size}")
+            print(f"hardness={hardness},K={ens_size}: \t", end="")
+            for kind in kinds:
+                fdf = df.loc[df["kind"] == kind, "weak_convergence"]
+                v = fdf.iloc[0] if not fdf.empty else None
+                if v is not None:
+                    print(f"{f'{v:.3f}':<10}", end="\t")
+                else:
+                    print(f"{'undefined':<10}", end="\t")
+            print()

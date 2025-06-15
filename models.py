@@ -40,7 +40,7 @@ class Model(eqx.Module):
         layer_sizes=None,
     ):
         if layer_sizes is None:
-            layer_sizes = [24, 24]
+            layer_sizes = [64, 64]
         layer_sizes = [observation_size, *layer_sizes, action_size]
 
         layers = []

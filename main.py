@@ -26,6 +26,7 @@ from models import (
     Bootstrapped,
     EpsilonGreedy,
 )
+from jax.sharding import PartitionSpec as P
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 
@@ -34,7 +35,7 @@ jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 jax.config.update("jax_persistent_cache_enable_xla_caches", "xla_gpu_per_fusion_autotune_cache_dir")
 
-max_trainings_in_parallel = 20
+max_trainings_in_parallel = 8 * jax.device_count()
 
 
 class Config(eqx.Module):
@@ -321,11 +322,20 @@ def schedule_runs(
 
     concurrent = min(N, concurrent)
     pbar = range(0, N, concurrent)
-    if N >= concurrent * 5:
+    if N >= concurrent * 3:
         pbar = tqdm(pbar)
     for _i in pbar:
         # next line does the actual training with given seeds
-        _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg))(keys[_i : _i + concurrent])
+        # start with sharding
+        ckeys = keys[_i : _i + concurrent]
+        if jax.device_count() != 1:
+            mesh = jax.make_mesh((jax.device_count(),), ("x",))
+            sharding = jax.sharding.NamedSharding(mesh, P("x"))
+            ckeys = jax.device_put(ckeys, sharding)
+            if _i == 0:
+                jax.debug.visualize_array_sharding(ckeys)
+        _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg))(ckeys)
+
         for tr, m_indices in zip(logs["train_reward"], logs["model_indices"]):
             tr = np.array(tr)
             mask = np.logical_not(np.isnan(tr))
@@ -360,43 +370,61 @@ def schedule_runs(
             yaml.safe_dump(dataclasses.asdict(cfg), f)
         with open(folder_path / ".version", "w") as f:
             f.write(f"{VERSION}")
-    pd.DataFrame(results).to_csv(folder_path / "results.csv", index=False)
+    results = pd.DataFrame(results)
+    results.to_csv(folder_path / "results.csv", index=False)
 
     return results
 
 
 if __name__ == "__main__":
-    experiment = "24"
-    N = 40
+    experiment = "26"
+    N = 64
 
-    hardnesses = [6, 7, 8, 9, 10, 12, 14, 16, 20, 24, 28, 32]
+    hardness_resolution = 2
+    hardnesses = list(range(6, 41, hardness_resolution))
     ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 26, 32]
 
-    all_specs = [(x, y) for x, y in itertools.product(hardnesses, ens_sizes)]
-    random.seed(42)
-    random.shuffle(all_specs)
+    all_specs = [(x, y) for x, y in itertools.product(ens_sizes, hardnesses)]
 
-    est_time = lambda h, k, n: (h * h * k / 100 + k / 1.2) * n / 250  # time in minutes to complete
+    def est_time(k, h, n):
+        k *= 3
+        return (
+            8.28642e-04 * h
+            - 2.48254e-04 * h * k
+            + 1.28879e-05 * h**2
+            + 3.12066e-04 * k**2
+            + 4.42015e-05 * h**2 * k
+            - 4.09876e-05 * h * k**2
+            + 9.31602e-07 * h**2 * k**2
+        ) * n  # fitted using lasso
 
-    def n_rule(h, k):
-        if k <= 5 and h <= 14:
-            return N * 10
-        if k >= 10 or h >= 10:
-            return N // 2
+    def n_rule(k, h):
         return N
 
     total = 0.0
-    for h, k in all_specs:
-        total += est_time(h, k, n_rule(h, k))
+    for k, h in all_specs:
+        total += est_time(k, h, n_rule(k, h))
     print(f"{2 * total / 60:.2f} hours")
 
     time_records = []
     tfilehash = int(time.time()) % 1_000_000
-    for kind in ["boot", "bootrp"]:
-        for hardness, ensemble_size in all_specs:
-            n = n_rule(hardness, ensemble_size)
+    skip_counter = 0
+    last_full_hardness = 0
+    for kind in ["boot"]:
+        for ensemble_size, hardness in tqdm(all_specs, position=1):
+            if hardness == min(hardnesses):
+                skip_counter = 0
+            if skip_counter >= 2:
+                continue
+            if hardness <= last_full_hardness - 2 * hardness_resolution:
+                continue
+            n = n_rule(ensemble_size, hardness)
+            print(
+                f"Next run is expected to take {est_time(ensemble_size, hardness, n):.1f} minutes..."
+            )
+
             t0 = time.time()
-            schedule_runs(
+            results = schedule_runs(
                 n,
                 cfg=Config(
                     kind=kind,
@@ -407,10 +435,16 @@ if __name__ == "__main__":
                 output_root=f"results/{experiment}",
             )
             took = (time.time() - t0) / 60
-            print(
-                f"(h={hardness}, K={ensemble_size}) was expected to take {est_time(hardness, ensemble_size, N):.2f} minutes, and actually took {took:.2f} minutes"
-            )
             time_records.append(
                 {"h": hardness, "k": ensemble_size, "t": took, "kind": kind, "N": n}
             )
-            pd.DataFrame(time_records).to_csv(f"time_records_{tfilehash}.csv")
+            pd.DataFrame(time_records).to_csv(f"aux_results/time_records_{tfilehash}.csv")
+
+            if results is not None:
+                if results["weak_convergence"].sum() == 0:
+                    skip_counter += 1
+                else:
+                    skip_counter = 0
+
+                if results["weak_convergence"].sum() == 1:
+                    last_full_hardness = hardness

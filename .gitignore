@@ -2,6 +2,7 @@ wandb
 videos
 outputs
 results
+aux_results
 plots/png
 *.zip
 *csv
