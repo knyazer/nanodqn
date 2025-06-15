@@ -27,6 +27,7 @@ from models import (
     EpsilonGreedy,
 )
 from jax.sharding import PartitionSpec as P
+from helpers import df_from, df_to
 
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.95"
 
@@ -319,14 +320,14 @@ def schedule_runs(
     N: int, cfg: Config, output_root: str, concurrent: int = max_trainings_in_parallel
 ):
     # This function just reports results in a nice format
-    VERSION = 2
+    VERSION = 3
     run_name_base = f"{cfg.unique_str()}"
     run_name = run_name_base
     folder_path = Path(output_root) / run_name
 
     if folder_path.exists():
         print(f"{folder_path} exists hence skipping")
-        return pd.read_csv(folder_path / "results.csv")
+        return df_from(folder_path / "results.csv")
     results = []
     thresh = 0.95
 
@@ -376,7 +377,7 @@ def schedule_runs(
                 {
                     "weak_convergence": weak_convergence,
                     "time_to_weak": time_to_weak,
-                    "weight_space_distance": compress_to(w_diff, 100),
+                    "collapse_metric": compress_to(w_diff, 100),
                     "strong_convergence": strong_convergence,
                     "time_to_strong": time_to_strong,
                 }
@@ -390,7 +391,7 @@ def schedule_runs(
         with open(folder_path / ".version", "w") as f:
             f.write(f"{VERSION}")
     results = pd.DataFrame(results)
-    results.to_csv(folder_path / "results.csv", index=False)
+    df_to(results, folder_path / "results.csv")
 
     return results
 
@@ -410,7 +411,7 @@ def exp_heatmap():
 
     skip_counter = 0
     last_full_hardness = 0
-    for kind in ["boot"]:
+    for kind in ["bootrp", "boot"]:
         for ensemble_size, hardness in tqdm(all_specs, position=1):
             if hardness == min(hardnesses):
                 skip_counter = 0

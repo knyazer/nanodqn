@@ -8,6 +8,7 @@ import seaborn as sns
 import yaml
 import functools as ft
 from typing import Literal
+from helpers import df_from
 
 
 @ft.lru_cache
@@ -15,15 +16,15 @@ def load(path: str | Path):
     folder = Path(path)
     with open(folder / ".version") as f:
         v = f.read().strip()
-    if v != "1":
+    if not (v == "1" or v == "2" or v == "3"):
         raise ValueError(f"unsupported result log version {v}")
-    df = pd.read_csv(folder / "results.csv")
+    df = df_from(folder / "results.csv")
     with open(folder / "config.yaml") as f:
         cfg = yaml.safe_load(f)
     fields = [(key, type(value), dataclasses.field(default=value)) for key, value in cfg.items()]
     DynamicConfig = dataclasses.make_dataclass("DynamicConfig", fields)
     cfg_instance = DynamicConfig(**cfg)
-    return df, cfg_instance
+    return df, cfg_instance, int(v)
 
 
 @ft.lru_cache
@@ -32,9 +33,10 @@ def make_agg(version):
     paths = sorted(root.glob("*"))
     loaded = [load(path) for path in paths]
     agg = []
-    for df, cfg in loaded:
-        agg.append(
-            {
+    for df, cfg, ver in loaded:
+        row = None
+        if ver >= 1:
+            row = {
                 "mean_time_to_weak": df["time_to_weak"].mean(),
                 "max_time_to_weak": df["time_to_weak"].max(),
                 "mean_time_to_strong": df["time_to_strong"].mean(),
@@ -44,7 +46,19 @@ def make_agg(version):
                 "kind": cfg.kind,
                 "prior_scale": cfg.prior_scale,
             }
-        )
+        if ver == 3:
+            conv = df[df["weak_convergence"] == True]["collapse_metric"]
+            unconv = df[df["weak_convergence"] == False]["collapse_metric"]
+            row = {
+                **row,
+                "collapse_metric_mean_converged": conv.mean(),
+                "collapse_metric_mean_not_converged": unconv.mean(),
+                "collapse_metric_std_converged": conv.std(),
+                "collapse_metric_std_not_converged": unconv.std(),
+            }
+        if row is None:
+            raise RuntimeError(f"version was {ver} which does not seem to match any loading rules")
+        agg.append(row)
     return pd.DataFrame(agg)
 
 
@@ -110,9 +124,13 @@ def plot_heatmap():
         uniform_columns = np.arange(pivot_data.columns.min(), pivot_data.columns.max() + 1)
         uniform_df = pivot_data.reindex(index=uniform_index, columns=uniform_columns)
 
-        interpolated_data = uniform_df.interpolate(method="nearest", limit_direction="both", axis=1)
-        interpolated_data = interpolated_data.interpolate(
-            method="linear", limit_direction="both", axis=0
+        interpolated_data = (
+            uniform_df.interpolate(method="linear", limit_direction="both", axis=0).ffill().bfill()
+        )
+        interpolated_data = (
+            interpolated_data.interpolate(method="linear", limit_direction="both", axis=1)
+            .ffill()
+            .bfill()
         )
 
         sns.heatmap(
