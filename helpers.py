@@ -3,11 +3,20 @@ from typing import Sequence, Optional
 
 import numpy as np
 import pandas as pd
+import equinox as eqx
+
+
+def default_col_cond(v):
+    if isinstance(v, bool | int | float):
+        return False
+    if eqx.is_array(v) and len(v.shape) != 0:
+        return True
+    return False
 
 
 def df_to(df: pd.DataFrame, filename: str, array_cols: Optional[Sequence[str]] = None) -> None:
     if array_cols is None:
-        array_cols = [c for c in df.columns if isinstance(df.iloc[0][c], np.ndarray)]
+        array_cols = [c for c in df.columns if default_col_cond(df.iloc[0][c])]
 
     df_tmp = df.copy()
     for col in array_cols:

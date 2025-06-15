@@ -47,15 +47,22 @@ def make_agg(version):
                 "prior_scale": cfg.prior_scale,
             }
         if ver == 3:
-            conv = df[df["weak_convergence"] == True]["collapse_metric"]
-            unconv = df[df["weak_convergence"] == False]["collapse_metric"]
-            row = {
-                **row,
-                "collapse_metric_mean_converged": conv.mean(),
-                "collapse_metric_mean_not_converged": unconv.mean(),
-                "collapse_metric_std_converged": conv.std(),
-                "collapse_metric_std_not_converged": unconv.std(),
-            }
+            if df["weak_convergence"].sum() != 0:
+                conv = np.vstack(df[df["weak_convergence"] == True]["collapse_metric"].to_numpy())
+                row = {
+                    **row,
+                    "collapse_metric_mean_converged": conv.mean(axis=0),
+                    "collapse_metric_std_converged": conv.std(axis=0),
+                }
+            if df["weak_convergence"].prod() != 0:
+                unconv = np.vstack(
+                    df[df["weak_convergence"] == False]["collapse_metric"].to_numpy()
+                )
+                row = {
+                    **row,
+                    "collapse_metric_mean_not_converged": unconv.mean(axis=0),
+                    "collapse_metric_std_not_converged": unconv.std(axis=0),
+                }
         if row is None:
             raise RuntimeError(f"version was {ver} which does not seem to match any loading rules")
         agg.append(row)
@@ -105,7 +112,7 @@ def ax_set_log_scale(ax, m1=False):
 def plot_heatmap():
     agg = make_agg("heatmap")
     cmap = sns.color_palette("Blues", as_cmap=True)
-    kinds = ["boot"]  # , "bootrp"] # For simplicity, let's just run one for the example
+    kinds = ["bootrp", "boot"]  # , "bootrp"] # For simplicity, let's just run one for the example
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
 
@@ -149,12 +156,11 @@ def plot_heatmap():
         )
         ax.set_xticklabels([f"{x}" for x in pivot_data.columns])
 
-        if i == 0:
-            ax.set_yticks(
-                np.interp(pivot_data.index, uniform_index, np.arange(len(uniform_index))) + 0.5
-            )
-            ax.set_yticklabels(pivot_data.index.astype(int))
-            ax.set_ylabel("Ensemble Size (K)")
+        ax.set_yticks(
+            np.interp(pivot_data.index, uniform_index, np.arange(len(uniform_index))) + 0.5
+        )
+        ax.set_yticklabels(pivot_data.index.astype(int))
+        ax.set_ylabel("Ensemble Size (K)")
 
         ax.set_title(f"Kind = '{kind}'")
         ax.set_xlabel("Hardness (n)")
