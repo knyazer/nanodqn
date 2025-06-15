@@ -382,7 +382,7 @@ def exp_heatmap():
 
     hardness_resolution = 2
     hardnesses = list(range(6, 41, hardness_resolution))
-    ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 26, 32]
+    ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 28, 32, 36, 40]
 
     all_specs = [(x, y) for x, y in itertools.product(ens_sizes, hardnesses)]
 
