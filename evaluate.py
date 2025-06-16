@@ -8,6 +8,7 @@ import seaborn as sns
 import yaml
 import functools as ft
 from typing import Literal
+from scipy.optimize import minimize_scalar
 from helpers import df_from
 
 
@@ -90,7 +91,7 @@ def make_theoretical(ax, x_values, kind: Literal["slow", "fast"], param: float, 
         else:
             y = [1 - (1 - param**K_val) ** n for K_val in x_values]
 
-        label = f"$(1 - {beta:.2f})^K)^n$"
+        label = f"$(1 - {param:.2f})^K)^n$"
     return y, label
 
 
@@ -110,7 +111,7 @@ def ax_set_log_scale(ax, m1=False):
 
 
 def plot_heatmap():
-    agg = make_agg("heatmap")
+    agg = make_agg("heatmap24-home")
     cmap = sns.color_palette("Blues", as_cmap=True)
     kinds = ["boot", "bootrp"]  # , "bootrp"] # For simplicity, let's just run one for the example
 
@@ -140,13 +141,11 @@ def plot_heatmap():
         interpolated_data = (
             uniform_df.interpolate(method="nearest", limit_direction="both", axis=0).ffill().bfill()
         )
-        """
         interpolated_data = (
             interpolated_data.interpolate(method="nearest", limit_direction="both", axis=1)
             .ffill()
             .bfill()
         )
-        """
 
         sns.heatmap(
             interpolated_data,
@@ -168,17 +167,142 @@ def plot_heatmap():
             np.interp(pivot_data.index, uniform_index, np.arange(len(uniform_index))) + 0.5
         )
         ax.set_yticklabels(pivot_data.index.astype(int))
-        ax.set_ylabel("Ensemble Size (K)")
         ax.invert_yaxis()
 
-        ax.set_title(f"Kind = '{kind}'")
+        if kind == "boot":
+            ax.set_title("Probability of Discovery for BDQN")
+        if kind == "bootrp":
+            ax.set_title("Probability of Discovery for RP-BDQN")
         ax.set_ylabel("Hardness (n)")
+        ax.set_xlabel("Ensemble Size (K)")
 
     mappable = ax.collections[0]
     cbar = fig.colorbar(mappable, ax=axes, shrink=0.75, pad=0.03)
     cbar.set_label("Probability of Convergence", rotation=270, labelpad=20)
 
     plot_save("heatmap")
+    plt.show()
+
+
+def _fit_beta(df: pd.DataFrame, kind: str) -> float:
+    df = df[df["ensemble_size"] > 1]
+
+    def loss(b):
+        if b <= 0 or b >= 1:
+            return 1e18
+        p_hat = 1 - (1 - b ** df["hardness"]) ** (df["ensemble_size"] - 1)
+        return np.mean((p_hat - df["weak_convergence"]) ** 2)
+
+    res = minimize_scalar(loss, bounds=(1e-6, 1 - 1e-6), method="bounded")
+    beta = res.x
+
+    # compute predicted vs observed
+    p_hat = 1 - (1 - beta ** df["hardness"]) ** (df["ensemble_size"] - 1)
+
+    y = df["weak_convergence"].values
+    mse = np.mean((p_hat - y) ** 2)
+    ss_res = np.sum((y - p_hat) ** 2)
+    ss_tot = np.sum((y - np.mean(y)) ** 2)
+    r2 = 1 - ss_res / ss_tot
+    print(f"Kind={kind} gets r2={r2} and mse={mse} for beta={beta}")
+
+    return beta, mse, r2
+
+
+def compute_frontier(df: pd.DataFrame, kind: str, p: float, all_hardnesses) -> pd.DataFrame:
+    """
+    Theoretical frontier K(n) that attains probability p with the β
+    estimated by `_fit_beta`.  Works for both 'boot' and 'bootrp'.
+    """
+    beta, *_ = _fit_beta(df, kind)
+    n_vals = all_hardnesses
+
+    k_vals = np.log(1 - p) / np.log(1 - beta**n_vals) + 1
+
+    keep = (k_vals > 0) & np.isfinite(k_vals)
+    return pd.DataFrame({"ensemble_size": k_vals[keep], "hardness": n_vals[keep]})
+
+
+def plot_scatter_with_frontier(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
+    agg = make_agg("heatmap24-home")
+    kinds = ["boot", "bootrp"]
+    palette = "crest"
+
+    # --- 1. single colour map for BOTH dots and lines ---------------------------
+    cmap_points = sns.color_palette(palette, as_cmap=True)  # keeps your dots
+    norm = plt.Normalize(0, 1)
+
+    # Pull N *distinct* colours out of the same cmap for the curves.
+    #   • skip the very light & very dark ends (harder to see on white/black)
+    #   • space them evenly so they’re visually distinct
+    n_levels = len(p_levels)
+    cmap_line = plt.cm.get_cmap(palette)
+    colour_idx = np.linspace(0.25, 0.85, n_levels)  # tweak as you like
+    curve_cols = [cmap_line(i) for i in colour_idx]
+
+    all_hardnesses = np.sort(
+        np.array(list(agg["hardness"].unique()) + [agg["hardness"].max() * 1.11])
+    )
+
+    # --- 2. plotting ------------------------------------------------------------
+    fig, axes = plt.subplots(1, len(kinds), figsize=(14, 6), sharey=True)
+
+    x_min, x_max = agg["ensemble_size"].agg(["min", "max"])
+    y_min, y_max = agg["hardness"].agg(["min", "max"])
+
+    for ax, kind in zip(axes, kinds):
+        df = agg.query(f"kind == '{kind}'")
+
+        # empirical points
+        ax.scatter(
+            df["ensemble_size"],
+            df["hardness"],
+            c=df["weak_convergence"],
+            cmap=cmap_points,
+            norm=norm,
+            edgecolor="none",
+            s=30,
+            alpha=0.85,
+            rasterized=True,
+        )
+
+        # theoretical frontiers
+        beta, *_ = _fit_beta(df, kind)
+        for p, col in zip(p_levels, curve_cols):
+            fr = compute_frontier(df, kind, p, all_hardnesses)
+            if not fr.empty:
+                ax.plot(
+                    fr["ensemble_size"],
+                    fr["hardness"],
+                    linestyle="--",
+                    linewidth=2,
+                    color=col,
+                    label=f"p={p:.2f}",
+                )
+
+        ax.set_xlabel("Ensemble Size (K)")
+        if kind == "bootrp":
+            ax.set_title(f"RP-BDQN vs $1 - (1 - {beta:.2f}^n)^" + "{K - 1}$")
+        if kind == "boot":
+            ax.set_title(f"BDQN vs $1 - (1 - {beta:.2f}^n)^" + "{K - 1}$")
+        ax.grid(True, ls=":", lw=0.4)
+        ax.legend(loc="lower right")
+
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max * 1.05)
+
+    axes[0].set_ylabel("Hardness (n)")
+
+    cbar = fig.colorbar(
+        plt.cm.ScalarMappable(norm=norm, cmap=cmap_points),
+        ax=axes,
+        shrink=0.75,
+        pad=0.03,
+    )
+    cbar.set_label("Probability of Convergence", rotation=270, labelpad=20)
+
+    plot_save("frontier_theory_linear")
+    plt.tight_layout()
     plt.show()
 
 
@@ -202,6 +326,7 @@ def log(name):
 
 
 if __name__ == "__main__":
+    plot_scatter_with_frontier()
     plot_heatmap()
 
     log("heatmap")

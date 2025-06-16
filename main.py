@@ -415,7 +415,7 @@ def exp_heatmap():
 
     skip_counter = 0
     last_full_hardness = 0
-    for kind in ["bootrp", "boot"]:
+    for kind in ["boot", "bootrp"]:
         last_full_hardness = 0
         for ensemble_size, hardness in tqdm(all_specs, position=1):
             if hardness == min(hardnesses):
