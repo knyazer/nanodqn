@@ -112,7 +112,7 @@ def ax_set_log_scale(ax, m1=False):
 
 def plot_heatmap():
     agg = make_agg("heatmap24-home")
-    cmap = sns.color_palette("crest", as_cmap=True)
+    cmap = sns.color_palette("Blues", as_cmap=True)
     kinds = ["boot", "bootrp"]  # , "bootrp"] # For simplicity, let's just run one for the example
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
