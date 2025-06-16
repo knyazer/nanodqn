@@ -11,6 +11,8 @@ from typing import Literal
 from scipy.optimize import minimize_scalar
 from helpers import df_from
 
+plt.rcParams.update({"font.size": 12})
+
 
 @ft.lru_cache
 def load(path: str | Path):
@@ -71,6 +73,7 @@ def make_agg(version):
 
 
 def plot_save(name):
+    plt.tight_layout()
     Path("plots/png").mkdir(parents=True, exist_ok=True)
     plt.savefig(f"plots/{name}.svg")
     plt.savefig(f"plots/png/{name}.png", dpi=160)
@@ -184,20 +187,20 @@ def plot_heatmap():
     plt.show()
 
 
-def _fit_beta(df: pd.DataFrame, kind: str) -> float:
+def _fit_beta(df: pd.DataFrame, kind: str):
     df = df[df["ensemble_size"] > 1]
 
     def loss(b):
         if b <= 0 or b >= 1:
             return 1e18
-        p_hat = 1 - (1 - b ** df["hardness"]) ** (df["ensemble_size"] - 1)
+        p_hat = 1 - (1 - b ** df["hardness"]) ** df["ensemble_size"]
         return np.mean((p_hat - df["weak_convergence"]) ** 2)
 
     res = minimize_scalar(loss, bounds=(1e-6, 1 - 1e-6), method="bounded")
     beta = res.x
 
     # compute predicted vs observed
-    p_hat = 1 - (1 - beta ** df["hardness"]) ** (df["ensemble_size"] - 1)
+    p_hat = 1 - (1 - beta ** df["hardness"]) ** df["ensemble_size"]
 
     y = df["weak_convergence"].values
     mse = np.mean((p_hat - y) ** 2)
@@ -261,8 +264,8 @@ def plot_scatter_with_frontier(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
             cmap=cmap_points,
             norm=norm,
             edgecolor="none",
-            s=30,
-            alpha=0.85,
+            s=45,
+            alpha=0.7,
             rasterized=True,
         )
 
@@ -275,16 +278,16 @@ def plot_scatter_with_frontier(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
                     fr["ensemble_size"],
                     fr["hardness"],
                     linestyle="--",
-                    linewidth=2,
+                    linewidth=3,
                     color=col,
                     label=f"p={p:.2f}",
                 )
 
         ax.set_xlabel("Ensemble Size (K)")
         if kind == "bootrp":
-            ax.set_title(f"RP-BDQN vs $1 - (1 - {beta:.2f}^n)^" + "{K - 1}$")
+            ax.set_title(f"RP-BDQN vs $1 - (1 - {beta:.2f}^n)^" + "K$")
         if kind == "boot":
-            ax.set_title(f"BDQN vs $1 - (1 - {beta:.2f}^n)^" + "{K - 1}$")
+            ax.set_title(f"BDQN vs $1 - (1 - {beta:.2f}^n)^" + "K$")
         ax.grid(True, ls=":", lw=0.4)
         ax.legend(loc="lower right")
 
@@ -304,6 +307,88 @@ def plot_scatter_with_frontier(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
     plot_save("frontier_theory_linear")
     plt.tight_layout()
     plt.show()
+
+
+def plot_residuals(data_source="heatmap24-home"):
+    """
+    Generates a publication-quality plot of the scaling law residuals.
+    """
+    # Use a clean style suitable for papers
+    plt.style.use("seaborn-v0_8-whitegrid")
+
+    agg = make_agg(data_source)
+
+    fig, ax = plt.subplots(1, 1, figsize=(7, 4.5))  # Standard figure size
+
+    kind_map = {"boot": "BDQN", "bootrp": "RP-BDQN"}
+    # Use a color-blind friendly and distinct palette
+    palette = sns.color_palette("colorblind", n_colors=8)
+
+    for i, kind in enumerate(kind_map.keys()):
+        df = agg.query(f"kind == '{kind}'").copy()
+
+        # --- 1. Calculate Predictions and Residuals (including K=1) ---
+        beta, *_ = _fit_beta(df, kind)
+        df["predicted"] = 1 - (1 - beta ** df["hardness"]) ** df["ensemble_size"]
+        df["residual"] = df["predicted"] - df["weak_convergence"]
+
+        # --- 2. Group by K and get statistics ---
+        residual_stats = df.groupby("ensemble_size")["residual"].agg(["mean", "std"]).reset_index()
+
+        # --- 3. Plotting ---
+        color = palette[i + 2]
+        label = kind_map[kind]
+
+        ax.plot(
+            residual_stats["ensemble_size"],
+            residual_stats["mean"],
+            label=label,  # Simple legend label
+            color=color,
+            linewidth=2,
+            zorder=10,
+        )
+
+        ax.fill_between(
+            residual_stats["ensemble_size"],
+            residual_stats["mean"] - residual_stats["std"],
+            residual_stats["mean"] + residual_stats["std"],
+            color=color,
+            alpha=0.2,
+            zorder=5,
+        )
+
+    # --- 4. Final plot styling ---
+    # Add horizontal line for perfect fit
+    ax.axhline(0, color="black", linestyle="--", linewidth=1.2, zorder=1)
+
+    # *** NEW: Add vertical line to separate K=1 ***
+    ax.axvline(1, color="red", linestyle="--", linewidth=1.2, zorder=1, label="K=1 (Pure DQN)")
+
+    # Formal, clear labels
+    ax.set_xlabel("Ensemble Size, $K$", fontsize=12)
+    ax.set_ylabel("Residual ($P_{pred} - P_{obs}$)", fontsize=12)
+
+    # Adjust ticks and legend
+    ax.tick_params(axis="both", which="major", labelsize=11)
+
+    # Re-order legend handles to be more intuitive
+    handles, labels = ax.get_legend_handles_labels()
+    # Puts the K=1 label last
+    order = [0, 1, 2] if len(handles) == 3 else [i for i in range(len(handles))]  # Make robust
+    ax.legend(
+        [handles[idx] for idx in order],
+        [labels[idx] for idx in order],
+        loc="upper right",
+        fontsize=11,
+        title="Method",
+    )
+
+    # Set axis limits
+    ax.set_xlim(left=0, right=agg["ensemble_size"].max() + 1)
+
+    plt.tight_layout(pad=0.5)
+
+    plot_save("residuals_plot")
 
 
 def log(name):
@@ -326,6 +411,7 @@ def log(name):
 
 
 if __name__ == "__main__":
+    plot_residuals()
     plot_scatter_with_frontier()
     plot_heatmap()
 
