@@ -408,10 +408,9 @@ def exp_heatmap():
     hardnesses = (
         list(range(3, 12, hardness_resolution))
         + list(range(12, 20, hardness_resolution * 2))
-        + list(range(20, 32, hardness_resolution * 4))
-        + list(range(32, 100, hardness_resolution * 8))
+        + list(range(32, 100, hardness_resolution * 4))
     )
-    ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 50, 64, 80]
+    ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40]
 
     all_specs = [(x, y) for x, y in itertools.product(ens_sizes, hardnesses)]
 
@@ -422,7 +421,7 @@ def exp_heatmap():
         for ensemble_size, hardness in tqdm(all_specs, position=1):
             if hardness == min(hardnesses):
                 skip_counter = 0
-            if skip_counter >= 1:
+            if skip_counter >= 3:
                 continue
             if hardness < last_full_hardness:
                 continue
@@ -458,7 +457,7 @@ def exp_sweep():
         + list(range(20, 32, hardness_resolution * 4))
         + list(range(32, 100, hardness_resolution * 8))
     )
-    ens_sizes = [1, 2, 4, 6, 10, 16, 24, 40]
+    ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40]
 
     all_specs = [(x, y) for x, y in itertools.product(ens_sizes, hardnesses)]
 
