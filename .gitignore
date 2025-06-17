@@ -8,3 +8,4 @@ plots/*svg
 plots/pdf
 *.zip
 *csv
+.jax_cache

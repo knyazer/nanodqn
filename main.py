@@ -405,9 +405,10 @@ def exp_heatmap():
 
     hardness_resolution = 2
     hardnesses = (
-        [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-        + list(range(14, 32, hardness_resolution))
-        + list(range(32, 49, hardness_resolution * 2))  # last value is h=48
+        [3, 4, 5, 6, 7, 8, 9, 10, 11]
+        + list(range(12, 32, hardness_resolution))
+        + list(range(32, 48, hardness_resolution * 2))
+        + list(range(48, 80, hardness_resolution * 4))
     )
     ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40]
 
