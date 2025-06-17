@@ -9,3 +9,4 @@ plots/pdf
 *.zip
 *csv
 .jax_cache
+.*.bck
