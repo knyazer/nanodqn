@@ -69,7 +69,6 @@ class Config(eqx.Module):
         return str(self) + f"_{self.autoseed()}"
 
 
-@eqx.filter_jit
 def main(key: PRNGKeyArray = None, cfg: Config = Config(), debug: bool = False):
     assert key is not None, "Please specify 'key' as an argument to main"
     if debug:
@@ -411,9 +410,9 @@ def exp_heatmap():
     hardness_resolution = 2
     hardnesses = (
         [3, 4, 5, 6, 7, 8, 9, 10, 11]
-        + list(range(12, 32, hardness_resolution))
-        + list(range(32, 48, hardness_resolution * 2))
-        + list(range(48, 80, hardness_resolution * 4))
+        + list(range(12, 20, hardness_resolution))
+        + list(range(20, 32, hardness_resolution * 2))
+        + list(range(32, 100, hardness_resolution * 4))
     )
     ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40]
 
@@ -453,11 +452,3 @@ def exp_heatmap():
 
 if __name__ == "__main__":
     exp_heatmap()
-    """
-    schedule_runs(
-        10,
-        Config(hardness=20, kind="bootrp", ensemble_size=20, num_episodes=5_000),
-        output_root="results/tmp",
-        debug=True,
-    )
-    """

@@ -71,11 +71,6 @@ class ReplayBuffer(eqx.Module):
             next_obs = jax.vmap(lambda v: self.compress[0](v)[0])(next_obs)
         k = obs.shape[0]  # batch size
 
-        # ------------------------------------------------------------------ #
-        # 1. Make sure every tensor has the exact trailing dims expected by
-        #    the buffer.  We reshape instead of broadcast so shape
-        #    mismatches fail early and clearly.
-        # ------------------------------------------------------------------ #
         reward = reward.reshape(k, 1)
         done = done.reshape(k, 1)
 
@@ -84,14 +79,8 @@ class ReplayBuffer(eqx.Module):
         act_tail_shape = self.actions.shape[1:]  # ()  or (act_size,)
         action = action.reshape(k, *act_tail_shape)
 
-        # ------------------------------------------------------------------ #
-        # 2. Indices that handle wrap-around
-        # ------------------------------------------------------------------ #
         idx = jnp.mod(self.pos + jnp.arange(k), self.buffer_size)  # (k,)
 
-        # ------------------------------------------------------------------ #
-        # 3. Scatter-update
-        # ------------------------------------------------------------------ #
         new_observations = self.observations.at[idx].set(obs)
         new_next_observations = self.next_observations.at[idx].set(next_obs)
         new_actions = self.actions.at[idx].set(action)
@@ -99,9 +88,6 @@ class ReplayBuffer(eqx.Module):
         new_dones = self.dones.at[idx].set(done)
         new_masks = self.masks.at[idx].set(mask)
 
-        # ------------------------------------------------------------------ #
-        # 4. Advance cursor and (maybe) flip `full`
-        # ------------------------------------------------------------------ #
         new_pos = jnp.mod(self.pos + k, self.buffer_size)
         new_full = jnp.logical_or(self.full, (self.pos + k) >= self.buffer_size)
 
