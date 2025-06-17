@@ -141,7 +141,6 @@ def main(key: PRNGKeyArray = None, cfg: Config = Config(), debug: bool = False):
     optim = optax.adamw(cfg.lr * cfg.ensemble_size)
     opt_state = optim.init(eqx.filter(model, eqx.is_inexact_array))
 
-    @eqx.filter_jit(donate="all-except-first")
     def train(rb, model, opt_state, key):
         def loss_wrap(model, key):
             key, fkey = jr.split(key)
@@ -159,7 +158,6 @@ def main(key: PRNGKeyArray = None, cfg: Config = Config(), debug: bool = False):
         model = eqx.apply_updates(model, updates)
         return model, opt_state, (*info, loss)
 
-    @eqx.filter_jit(donate="all")
     def step(model, rb, obs_state, key, progress, model_indices):
         obs, state = obs_state
         step_key, mask_key, key = jr.split(key, 3)
@@ -225,7 +223,6 @@ def main(key: PRNGKeyArray = None, cfg: Config = Config(), debug: bool = False):
     key, subkey = jr.split(key)
     test_sample = rb.sample(subkey, 128)
 
-    @eqx.filter_jit(donate="all")
     def inner_loop(model, rb, obs, state, model_indices, opt_state, key, rews, i):
         progress = jnp.clip(i / num_steps, 0.0, 1.0)
         key, subkey, train_key, w_test_key = jr.split(key, 4)
