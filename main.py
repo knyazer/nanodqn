@@ -404,12 +404,12 @@ def exp_heatmap():
     experiment = RUN_NAME
     N = 32
 
-    hardness_resolution = 2
+    hardness_resolution = 1
     hardnesses = (
-        [3, 4, 5, 6, 7, 8, 9, 10, 11]
-        + list(range(12, 20, hardness_resolution))
-        + list(range(20, 32, hardness_resolution * 2))
-        + list(range(32, 100, hardness_resolution * 4))
+        list(range(3, 12, hardness_resolution))
+        + list(range(12, 20, hardness_resolution * 2))
+        + list(range(20, 32, hardness_resolution * 4))
+        + list(range(32, 100, hardness_resolution * 8))
     )
     ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40]
 
@@ -447,5 +447,66 @@ def exp_heatmap():
                     last_full_hardness = hardness
 
 
+def exp_sweep():
+    experiment = "sweep"
+    N = 16
+
+    hardness_resolution = 2
+    hardnesses = (
+        list(range(3, 12, hardness_resolution))
+        + list(range(12, 20, hardness_resolution * 2))
+        + list(range(20, 32, hardness_resolution * 4))
+        + list(range(32, 100, hardness_resolution * 8))
+    )
+    ens_sizes = [1, 2, 4, 6, 10, 16, 24, 40]
+
+    all_specs = [(x, y) for x, y in itertools.product(ens_sizes, hardnesses)]
+
+    def run(kinds, **kws):
+        skip_counter = 0
+        for kind in kinds:
+            last_full_hardness = 0
+            for ensemble_size, hardness in tqdm(all_specs, position=1):
+                if hardness == min(hardnesses):
+                    skip_counter = 0
+                if skip_counter >= 1:
+                    continue
+                if hardness < last_full_hardness:
+                    continue
+
+                results = schedule_runs(
+                    N,
+                    cfg=Config(
+                        kind=kind,
+                        num_episodes=50_000,
+                        ensemble_size=ensemble_size,
+                        hardness=hardness,
+                        **kws,
+                    ),
+                    output_root=f"results/{experiment}",
+                )
+
+                if results is not None:
+                    if results["weak_convergence"].sum() == 0:
+                        skip_counter += 1
+
+                    if results["weak_convergence"].mean() == 1:
+                        print(f"Setting new full hardness: {hardness}")
+                        last_full_hardness = hardness
+
+    for beta in [1.0, 5.0, 10.0]:
+        run(["bootdqn"], prior_scale=beta)
+
+    for lr in [8e-5, 5e-4, 1e-3]:
+        run(["boot", "bootrp"], lr=lr)
+
+    for batch_size in [16, 32, 128]:
+        run(["boot", "bootrp"], batch_size=batch_size)
+
+    for rb_size in [5_000, 20_000, 40_000]:
+        run(["boot", "bootrp"], rb_size=rb_size)
+
+
 if __name__ == "__main__":
     exp_heatmap()
+    exp_sweep()
