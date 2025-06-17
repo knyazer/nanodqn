@@ -11,7 +11,6 @@ DOUBLE_DQN = False
 T = TypeVar("T")
 
 
-@eqx.filter_jit
 def _loss(model, target_model, sample):
     if DOUBLE_DQN:
         best_action = model(sample.next_observations.squeeze()).argmax()
