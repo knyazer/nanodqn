@@ -70,7 +70,7 @@ class Config(eqx.Module):
 
 
 @eqx.filter_jit
-def main(key=None, cfg=Config(), debug=False):
+def main(key: PRNGKeyArray = None, cfg: Config = Config(), debug: bool = False):
     assert key is not None, "Please specify 'key' as an argument to main"
     if debug:
         jax.debug.print(
@@ -146,9 +146,11 @@ def main(key=None, cfg=Config(), debug=False):
     def train(rb, model, opt_state, key):
         def loss_wrap(model, key):
             key, fkey = jr.split(key)
-            keys = jr.split(fkey, cfg.batch_size * cfg.ensemble_size)
             samples = rb.sample(key, cfg.batch_size * cfg.ensemble_size)
-            loss, aux = eqx.filter_vmap(model.loss)(keys, samples)
+            samples = jax.tree.map(
+                lambda arr: arr.reshape(cfg.ensemble_size, cfg.batch_size, *arr.shape[1:]), samples
+            )
+            loss, aux = model.loss_all(samples)
             return loss.mean(), aux
 
         (loss, info), grads = eqx.filter_value_and_grad(
@@ -206,6 +208,9 @@ def main(key=None, cfg=Config(), debug=False):
         return carry_dyn, None
 
     n_iters = rb.buffer_size // cfg.num_envs
+
+    if debug:
+        jax.debug.print("Filling the replay buffer...")
 
     carry = (model, rb, (obs, state))
     carry_dyn, carry_st = eqx.partition(carry, eqx.is_array)
@@ -320,7 +325,7 @@ def compress_to(x, T=100):
 
 
 def schedule_runs(
-    N: int, cfg: Config, output_root: str, concurrent: int = max_trainings_in_parallel
+    N: int, cfg: Config, output_root: str, concurrent: int = max_trainings_in_parallel, debug=False
 ):
     # This function just reports results in a nice format
     VERSION = 3
@@ -354,7 +359,7 @@ def schedule_runs(
             ckeys = jax.device_put(ckeys, sharding)
             if _i == 0:
                 jax.debug.visualize_array_sharding(ckeys)
-        _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg))(ckeys)
+        _, logs = eqx.filter_vmap(eqx.Partial(main, cfg=cfg, debug=debug))(ckeys)
 
         for tr, m_indices, w_diff in zip(
             logs["train_reward"], logs["model_indices"], logs["w_diff"]
@@ -448,3 +453,11 @@ def exp_heatmap():
 
 if __name__ == "__main__":
     exp_heatmap()
+    """
+    schedule_runs(
+        10,
+        Config(hardness=20, kind="bootrp", ensemble_size=20, num_episodes=5_000),
+        output_root="results/tmp",
+        debug=True,
+    )
+    """

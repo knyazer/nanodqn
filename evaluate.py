@@ -194,14 +194,14 @@ def _fit_beta(df: pd.DataFrame, kind: str):
     def loss(b):
         if b <= 0 or b >= 1:
             return 1e18
-        p_hat = (1 - b ** df["ensemble_size"]) ** df["hardness"]
+        p_hat = 1 - (1 - b ** df["hardness"]) ** df["ensemble_size"]
         return np.mean((p_hat - df["weak_convergence"]) ** 2)
 
     res = minimize_scalar(loss, bounds=(1e-6, 1 - 1e-6), method="bounded")
     beta = res.x
 
     # compute predicted vs observed
-    p_hat = (1 - beta ** df["ensemble_size"]) ** df["hardness"]
+    p_hat = 1 - (1 - beta ** df["hardness"]) ** df["ensemble_size"]
 
     y = df["weak_convergence"].values
     mse = np.mean((p_hat - y) ** 2)
@@ -214,16 +214,10 @@ def _fit_beta(df: pd.DataFrame, kind: str):
 
 
 def compute_frontier(df: pd.DataFrame, kind: str, p: float, all_hardnesses) -> pd.DataFrame:
-    """
-    Theoretical frontier K(n) that attains probability p with the β
-    estimated by `_fit_beta`.  Works for both 'boot' and 'bootrp'.
-    """
     beta, *_ = _fit_beta(df, kind)
     n_vals = all_hardnesses
 
-    k_vals = np.log(1 - p ** (1 / n_vals)) / np.log(beta)
-
-    # np.log(1 - p) / np.log(1 - beta**n_vals)
+    k_vals = np.log(1 - p) / np.log(1 - beta**n_vals) + 1
 
     keep = (k_vals > 0) & np.isfinite(k_vals)
     return pd.DataFrame({"ensemble_size": k_vals[keep], "hardness": n_vals[keep]})
@@ -313,9 +307,6 @@ def plot_scatter_with_frontier(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
 
 
 def plot_residuals():
-    """
-    Generates a publication-quality plot of the scaling law residuals.
-    """
     # Use a clean style suitable for papers
     plt.style.use("seaborn-v0_8-whitegrid")
 

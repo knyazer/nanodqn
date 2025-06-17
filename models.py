@@ -11,6 +11,24 @@ DOUBLE_DQN = False
 T = TypeVar("T")
 
 
+@eqx.filter_jit
+def _loss(model, target_model, sample):
+    if DOUBLE_DQN:
+        best_action = model(sample.next_observations.squeeze()).argmax()
+        next_target_q_value = (target_model(sample.next_observations.squeeze()))[best_action]
+    else:
+        next_target_q_value = jnp.max(target_model(sample.next_observations.squeeze()))
+
+    next_q_value = jax.lax.stop_gradient(
+        sample.rewards + (1 - sample.dones) * gamma * next_target_q_value
+    ).squeeze()
+
+    # compute our model's prediction of the next value
+    q_pred = model(sample.observations.squeeze())
+    q_pred = q_pred[sample.actions]
+    return ((q_pred - next_q_value) ** 2).mean(), (q_pred, next_q_value)
+
+
 def keys_like(pytree, key):
     leaves, treedef = jax.tree.flatten(pytree)
     subkeys = jr.split(key, len(leaves))
@@ -70,6 +88,7 @@ class ModelWithPrior(Model):
         self.scale = float(scale)
 
     def __call__(self, x):
+        x = x.ravel()
         return super().__call__(x) + jax.lax.stop_gradient(self.prior(x) * self.scale)
 
 
@@ -88,26 +107,7 @@ class DQN(eqx.Module):
         self.action_space = action_space
 
     def loss(self, key: PRNGKeyArray, sample):
-        rkey, key = jr.split(key)
-
-        target_model = self.target_model
-        model = self.model
-
-        # compute the 'target' q value (next step)
-        if DOUBLE_DQN:  # double dqn
-            best_action = model(sample.next_observations.squeeze()).argmax()
-            next_target_q_value = (target_model(sample.next_observations.squeeze()))[best_action]
-        else:
-            next_target_q_value = jnp.max(target_model(sample.next_observations.squeeze()))
-
-        next_q_value = jax.lax.stop_gradient(
-            sample.rewards + (1 - sample.dones) * gamma * next_target_q_value
-        ).squeeze()
-
-        # compute our model's prediction of the next value
-        q_pred = model(sample.observations.squeeze())
-        q_pred = q_pred[sample.actions]
-        return ((q_pred - next_q_value) ** 2).mean(), (q_pred, next_q_value)
+        return _loss(self.model, self.target_model, sample)
 
     def action(self, observation: Any, *args, **kwargs):
         return self.model(observation).argmax()
@@ -158,37 +158,24 @@ class Bootstrapped(DQN):
     def __len__(self):
         return self.ensemble_size
 
+    def loss_all(self, samples):
+        def loss_single(sample, model_index):
+            s = self[model_index]
+            return eqx.filter_vmap(lambda smp: _loss(s.model, s.target_model, smp))(sample)
+
+        return eqx.filter_vmap(loss_single)(samples, jnp.arange(self.ensemble_size))
+
     def loss(self, key: PRNGKeyArray, sample):
-        rkey, subkey, key = jr.split(key, 3)
-
-        model_index = jr.randint(subkey, (), 0, self.ensemble_size)
-        self = self[model_index]
-
-        target_model = self.target_model
-        model = self.model
-
-        # compute the 'target' q value (next step)
-        if DOUBLE_DQN:
-            best_action = model(sample.next_observations.squeeze()).argmax()
-            next_target_q_value = (target_model(sample.next_observations.squeeze()))[best_action]
-        else:
-            next_target_q_value = jnp.max(target_model(sample.next_observations.squeeze()))
-
-        next_q_value = jax.lax.stop_gradient(
-            sample.rewards + (1 - sample.dones) * gamma * next_target_q_value
-        ).squeeze()
-
-        # compute our model's prediction of the next value
-        q_pred = model(sample.observations.squeeze())
-        q_pred = q_pred[sample.actions]
-        return ((q_pred - next_q_value) ** 2).mean(), (q_pred, next_q_value)
+        model_index = jr.randint(key, (), 0, self.ensemble_size)
+        s = self[model_index]
+        return _loss(s.model, s.target_model, sample)
 
     def q_pred_all(self, sample):
-        vs = []
-        for m_index in range(self.ensemble_size):
+        def wrp(m_index):
             m = self[m_index]
-            vs.append(eqx.filter_vmap(m.model)(sample.next_observations.squeeze()))
-        return jnp.array(vs)
+            return eqx.filter_vmap(m.model)(sample.next_observations.squeeze())
+
+        return eqx.filter_vmap(wrp)(jnp.arange(self.ensemble_size))
 
     def action(self, observation: Float[Array, "obs_size"], *_, index=None, **kws):
         assert index is not None
