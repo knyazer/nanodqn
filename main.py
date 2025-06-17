@@ -32,7 +32,7 @@ from models import (
     EpsilonGreedy,
 )
 from jax.sharding import PartitionSpec as P
-from helpers import df_from, df_to
+from helpers import RUN_NAME, df_from, df_to
 
 jax.config.update("jax_compilation_cache_dir", ".jax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
@@ -400,7 +400,7 @@ def schedule_runs(
 
 
 def exp_heatmap():
-    experiment = "heatmap24"
+    experiment = RUN_NAME
     N = 32
 
     hardness_resolution = 2

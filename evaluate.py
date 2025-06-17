@@ -10,7 +10,7 @@ import yaml
 import functools as ft
 from typing import Literal
 from scipy.optimize import minimize_scalar
-from helpers import df_from
+from helpers import df_from, RUN_NAME
 
 plt.rcParams.update({"font.size": 12})
 
@@ -115,7 +115,7 @@ def ax_set_log_scale(ax, m1=False):
 
 
 def plot_heatmap():
-    agg = make_agg("heatmap24-home")
+    agg = make_agg(RUN_NAME)
     cmap = sns.color_palette("Blues", as_cmap=True)
     kinds = ["boot", "bootrp"]  # , "bootrp"] # For simplicity, let's just run one for the example
 
@@ -230,7 +230,7 @@ def compute_frontier(df: pd.DataFrame, kind: str, p: float, all_hardnesses) -> p
 
 
 def plot_scatter_with_frontier(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
-    agg = make_agg("heatmap24-home")
+    agg = make_agg(RUN_NAME)
     kinds = ["boot", "bootrp"]
     palette = "crest"
 
@@ -312,14 +312,14 @@ def plot_scatter_with_frontier(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
     plt.show()
 
 
-def plot_residuals(data_source="heatmap24-home"):
+def plot_residuals():
     """
     Generates a publication-quality plot of the scaling law residuals.
     """
     # Use a clean style suitable for papers
     plt.style.use("seaborn-v0_8-whitegrid")
 
-    agg = make_agg(data_source)
+    agg = make_agg(RUN_NAME)
 
     fig, ax = plt.subplots(1, 1, figsize=(7, 4.5))  # Standard figure size
 
@@ -397,7 +397,7 @@ def plot_residuals(data_source="heatmap24-home"):
 def plot_diversity_collapse():
     plt.style.use("seaborn-v0_8-whitegrid")
 
-    df_agg = make_agg("heatmap24-home")
+    df_agg = make_agg(RUN_NAME)
     df_critical = df_agg.query("8 <= hardness <= 12 and 3 <= ensemble_size <= 6").copy()
 
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -502,4 +502,4 @@ if __name__ == "__main__":
     plot_scatter_with_frontier()
     plot_heatmap()
 
-    log("heatmap")
+    log(RUN_NAME)

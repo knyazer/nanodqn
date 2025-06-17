@@ -5,6 +5,8 @@ import numpy as np
 import pandas as pd
 import equinox as eqx
 
+RUN_NAME = "final_run"
+
 
 def default_col_cond(v):
     if isinstance(v, bool | int | float):
