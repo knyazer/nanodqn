@@ -407,7 +407,7 @@ def exp_heatmap():
     hardness_resolution = 1
     hardnesses = (
         list(range(3, 12, hardness_resolution))
-        + list(range(12, 20, hardness_resolution * 2))
+        + list(range(12, 32, hardness_resolution * 2))
         + list(range(32, 100, hardness_resolution * 4))
     )
     ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40]
@@ -440,6 +440,7 @@ def exp_heatmap():
             if results is not None:
                 if results["weak_convergence"].sum() == 0:
                     skip_counter += 1
+                    print("Current skip counter is {skip_counter}")
 
                 if results["weak_convergence"].mean() == 1:
                     print(f"Setting new full hardness: {hardness}")

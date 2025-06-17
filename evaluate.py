@@ -114,34 +114,60 @@ def ax_set_log_scale(ax, m1=False):
         ax.set_yscale("log")
 
 
-def plot_heatmap():
+def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
     agg = make_agg(RUN_NAME)
-    cmap = sns.color_palette("Blues", as_cmap=True)
-    kinds = ["boot", "bootrp"]  # , "bootrp"] # For simplicity, let's just run one for the example
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
-
+    kinds = ["boot", "bootrp"]
+    palette = "crest"
+    
+    # Color setup for frontier
+    cmap_points = sns.color_palette(palette, as_cmap=True)
+    norm = plt.Normalize(0, 1)
+    
+    n_levels = len(p_levels)
+    cmap_line = plt.get_cmap(palette)
+    colour_idx = np.linspace(0.25, 0.85, n_levels)
+    curve_cols = [cmap_line(i) for i in colour_idx]
+    
+    all_hardnesses = np.sort(
+        np.array(list(agg["hardness"].unique()) + [agg["hardness"].max() * 1.11])
+    )
+    
+    # Heatmap color setup
+    cmap_heatmap = sns.color_palette("Blues", as_cmap=True)
+    
+    # Create subplots with 2 rows, 2 columns
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12), sharex=True)
+    
+    # Get data bounds
     max_ens_size = agg["ensemble_size"].max()
     min_ens_size = agg["ensemble_size"].min()
-
     max_hardness = agg["hardness"].max()
     min_hardness = agg["hardness"].min()
-
+    x_min, x_max = agg["ensemble_size"].agg(["min", "max"])
+    y_min, y_max = agg["hardness"].agg(["min", "max"])
+    
     for i, kind in enumerate(kinds):
-        ax = axes[i]
+        # Top row: heatmaps
+        ax_heat = axes[0, i]
+        # Bottom row: frontiers
+        ax_front = axes[1, i]
+        
         df_kind = agg.query(f"kind == '{kind}'")
+        
+        # --- HEATMAP (top row) ---
         duplicates = df_kind[df_kind.duplicated(subset=["hardness", "ensemble_size"], keep=False)]
         if len(duplicates) != 0:
             print(duplicates.head(), duplicates["ensemble_size"], duplicates["hardness"])
             breakpoint()
+        
         pivot_data = df_kind.pivot(
             index="hardness", columns="ensemble_size", values="weak_convergence"
         )
-
+        
         uniform_index = np.arange(min_hardness, max_hardness + 1)
         uniform_columns = np.arange(min_ens_size, max_ens_size + 1)
         uniform_df = pivot_data.reindex(index=uniform_index, columns=uniform_columns)
-
+        
         interpolated_data = (
             uniform_df.interpolate(method="nearest", limit_direction="both", axis=0).ffill().bfill()
         )
@@ -150,41 +176,93 @@ def plot_heatmap():
             .ffill()
             .bfill()
         )
-
+        
         sns.heatmap(
             interpolated_data,
-            ax=ax,
-            cmap=cmap,
+            ax=ax_heat,
+            cmap=cmap_heatmap,
             vmin=0,
             vmax=1.0,
             cbar=False,
             xticklabels=False,
             yticklabels=False,
         )
-
-        ax.set_xticks(
+        
+        ax_heat.set_xticks(
             np.interp(pivot_data.columns, uniform_columns, np.arange(len(uniform_columns))) + 0.5
         )
-        ax.set_xticklabels([f"{x}" for x in pivot_data.columns])
-
-        ax.set_yticks(
+        ax_heat.set_xticklabels([f"{x}" for x in pivot_data.columns])
+        
+        ax_heat.set_yticks(
             np.interp(pivot_data.index, uniform_index, np.arange(len(uniform_index))) + 0.5
         )
-        ax.set_yticklabels(pivot_data.index.astype(int))
-        ax.invert_yaxis()
-
+        ax_heat.set_yticklabels(pivot_data.index.astype(int))
+        ax_heat.invert_yaxis()
+        
         if kind == "boot":
-            ax.set_title("Probability of Discovery for BDQN")
+            ax_heat.set_title("Probability of Discovery for BDQN")
         if kind == "bootrp":
-            ax.set_title("Probability of Discovery for RP-BDQN")
-        ax.set_ylabel("Hardness (n)")
-        ax.set_xlabel("Ensemble Size (K)")
-
-    mappable = ax.collections[0]
-    cbar = fig.colorbar(mappable, ax=axes, shrink=0.75, pad=0.03)
-    cbar.set_label("Probability of Convergence", rotation=270, labelpad=20)
-
-    plot_save("heatmap")
+            ax_heat.set_title("Probability of Discovery for RP-BDQN")
+        ax_heat.set_ylabel("Hardness (n)")
+        
+        # --- FRONTIER (bottom row) ---
+        # empirical points
+        ax_front.scatter(
+            df_kind["ensemble_size"],
+            df_kind["hardness"],
+            c=df_kind["weak_convergence"],
+            cmap=cmap_points,
+            norm=norm,
+            edgecolor="none",
+            s=45,
+            alpha=0.7,
+            rasterized=True,
+        )
+        
+        # theoretical frontiers
+        beta, *_ = _fit_beta(df_kind, kind)
+        for p, col in zip(p_levels, curve_cols):
+            fr = compute_frontier(df_kind, kind, p, all_hardnesses)
+            if not fr.empty:
+                ax_front.plot(
+                    fr["ensemble_size"],
+                    fr["hardness"],
+                    linestyle="--",
+                    linewidth=3,
+                    color=col,
+                    label=f"p={p:.2f}",
+                )
+        
+        ax_front.set_xlabel("Ensemble Size (K)")
+        if kind == "bootrp":
+            ax_front.set_title(f"RP-BDQN vs $1 - (1 - {beta:.2f}^n)^" + "K$")
+        if kind == "boot":
+            ax_front.set_title(f"BDQN vs $1 - (1 - {beta:.2f}^n)^" + "K$")
+        ax_front.grid(True, ls=":", lw=0.4)
+        ax_front.legend(loc="lower right")
+        
+        ax_front.set_xlim(x_min, x_max)
+        ax_front.set_ylim(y_min, y_max * 1.05)
+    
+    axes[1, 0].set_ylabel("Hardness (n)")
+    
+    # Add colorbars
+    # Heatmap colorbar
+    mappable_heat = axes[0, 0].collections[0]
+    cbar_heat = fig.colorbar(mappable_heat, ax=axes[0, :], shrink=0.75, pad=0.03)
+    cbar_heat.set_label("Probability of Convergence", rotation=270, labelpad=20)
+    
+    # Frontier colorbar
+    cbar_front = fig.colorbar(
+        plt.cm.ScalarMappable(norm=norm, cmap=cmap_points),
+        ax=axes[1, :],
+        shrink=0.75,
+        pad=0.03,
+    )
+    cbar_front.set_label("Probability of Convergence", rotation=270, labelpad=20)
+    
+    plot_save("frontier_and_heatmaps")
+    plt.tight_layout()
     plt.show()
 
 
@@ -490,7 +568,6 @@ def log(name):
 if __name__ == "__main__":
     plot_diversity_collapse()
     plot_residuals()
-    plot_scatter_with_frontier()
-    plot_heatmap()
+    plot_frontier_and_heatmaps()
 
     log(RUN_NAME)
