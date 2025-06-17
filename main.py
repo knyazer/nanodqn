@@ -495,7 +495,7 @@ def exp_sweep():
                         last_full_hardness = hardness
 
     for beta in [1.0, 5.0, 10.0]:
-        run(["bootdqn"], prior_scale=beta)
+        run(["bootrp"], prior_scale=beta)
 
     for lr in [8e-5, 5e-4, 1e-3]:
         run(["boot", "bootrp"], lr=lr)
