@@ -1,3 +1,4 @@
+from math import sqrt
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -55,7 +56,7 @@ def make_agg(version):
                 row = {
                     **row,
                     "collapse_metric_mean_converged": conv.mean(axis=0),
-                    "collapse_metric_std_converged": conv.std(axis=0),
+                    "collapse_metric_std_converged": conv.std(axis=0) / sqrt(conv.shape[0]),
                 }
             if df["weak_convergence"].prod() == 0:
                 unconv = np.vstack(
@@ -64,7 +65,7 @@ def make_agg(version):
                 row = {
                     **row,
                     "collapse_metric_mean_not_converged": unconv.mean(axis=0),
-                    "collapse_metric_std_not_converged": unconv.std(axis=0),
+                    "collapse_metric_std_not_converged": unconv.std(axis=0) / sqrt(unconv.shape[0]),
                 }
         if row is None:
             raise RuntimeError(f"version was {ver} which does not seem to match any loading rules")
@@ -193,14 +194,14 @@ def _fit_beta(df: pd.DataFrame, kind: str):
     def loss(b):
         if b <= 0 or b >= 1:
             return 1e18
-        p_hat = 1 - (1 - b ** df["hardness"]) ** df["ensemble_size"]
+        p_hat = (1 - b ** df["ensemble_size"]) ** df["hardness"]
         return np.mean((p_hat - df["weak_convergence"]) ** 2)
 
     res = minimize_scalar(loss, bounds=(1e-6, 1 - 1e-6), method="bounded")
     beta = res.x
 
     # compute predicted vs observed
-    p_hat = 1 - (1 - beta ** df["hardness"]) ** df["ensemble_size"]
+    p_hat = (1 - beta ** df["ensemble_size"]) ** df["hardness"]
 
     y = df["weak_convergence"].values
     mse = np.mean((p_hat - y) ** 2)
@@ -220,7 +221,9 @@ def compute_frontier(df: pd.DataFrame, kind: str, p: float, all_hardnesses) -> p
     beta, *_ = _fit_beta(df, kind)
     n_vals = all_hardnesses
 
-    k_vals = np.log(1 - p) / np.log(1 - beta**n_vals) + 1
+    k_vals = np.log(1 - p ** (1 / n_vals)) / np.log(beta)
+
+    # np.log(1 - p) / np.log(1 - beta**n_vals)
 
     keep = (k_vals > 0) & np.isfinite(k_vals)
     return pd.DataFrame({"ensemble_size": k_vals[keep], "hardness": n_vals[keep]})
@@ -239,7 +242,7 @@ def plot_scatter_with_frontier(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
     #   • skip the very light & very dark ends (harder to see on white/black)
     #   • space them evenly so they’re visually distinct
     n_levels = len(p_levels)
-    cmap_line = plt.cm.get_cmap(palette)
+    cmap_line = plt.get_cmap(palette)
     colour_idx = np.linspace(0.25, 0.85, n_levels)  # tweak as you like
     curve_cols = [cmap_line(i) for i in colour_idx]
 
@@ -391,6 +394,89 @@ def plot_residuals(data_source="heatmap24-home"):
     plot_save("residuals_plot")
 
 
+def plot_diversity_collapse():
+    plt.style.use("seaborn-v0_8-whitegrid")
+
+    df_agg = make_agg("heatmap24-home")
+    df_critical = df_agg.query("8 <= hardness <= 12 and 3 <= ensemble_size <= 6").copy()
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    # 2. Setup aesthetics and loop variables
+    kind_map = {"boot": "BDQN", "bootrp": "RP-BDQN"}
+    palette = sns.color_palette("colorblind", n_colors=8)
+    outcomes = {
+        "converged": ("solid", "Converged"),
+        "not_converged": ("dashed", "Failed"),
+    }
+
+    for i, (kind_code, kind_name) in enumerate(kind_map.items()):
+        color = palette[i + 2]
+
+        for outcome_code, (linestyle, outcome_name) in outcomes.items():
+            mean_col = f"collapse_metric_mean_{outcome_code}"
+            std_col = f"collapse_metric_std_{outcome_code}"
+
+            # Filter to rows that contain data for this outcome
+            df_plot = df_critical[df_critical["kind"] == kind_code].dropna(subset=[mean_col])
+
+            if df_plot.empty:
+                print(f"Skipping {kind_name} - {outcome_name} (no data)")
+                continue
+
+            # Aggregate the time-series arrays across all configs in the critical region
+            mean_curves = np.vstack(df_plot[mean_col].values)
+            std_curves = np.vstack(df_plot[std_col].values)
+
+            # Calculate the final mean and std over the aggregated curves
+            final_mean = np.mean(mean_curves, axis=0)
+            # For visualization, we average the std dev curves. This represents the "average spread".
+            final_std = np.mean(std_curves, axis=0)
+
+            # Generate the x-axis (time)
+            # Assumes all collapse metric arrays have the same length
+            num_logs = len(final_mean)
+            time_steps = np.arange(num_logs) * 5e2  # cuz 50k steps and 100 logs
+
+            # Plotting
+            label = f"{kind_name} ({outcome_name})"
+            ax.plot(
+                time_steps,
+                final_mean,
+                label=label,
+                color=color,
+                linestyle=linestyle,
+                linewidth=2,
+                zorder=10,
+            )
+            ax.fill_between(
+                time_steps,
+                final_mean - final_std,
+                final_mean + final_std,
+                color=color,
+                alpha=0.15,
+                zorder=5,
+            )
+
+    # 4. Final plot styling for publication
+    ax.set_xlabel("Training Episodes", fontsize=12)
+    ax.set_ylabel("Q-Diversity (higher is better)", fontsize=12)
+    ax.tick_params(axis="both", which="major", labelsize=11)
+    ax.legend(fontsize=11)
+    ax.grid(True, which="both", linestyle=":", linewidth=0.6)
+    ax.set_yscale("log")
+
+    # Use scientific notation for the x-axis if numbers are large
+    ax.ticklabel_format(style="sci", axis="x", scilimits=(0, 0))
+
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+
+    plt.tight_layout(pad=0.5)
+
+    plot_save("collapse")
+
+
 def log(name):
     agg = make_agg(name)
 
@@ -411,6 +497,7 @@ def log(name):
 
 
 if __name__ == "__main__":
+    plot_diversity_collapse()
     plot_residuals()
     plot_scatter_with_frontier()
     plot_heatmap()

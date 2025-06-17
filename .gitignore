@@ -4,7 +4,7 @@ outputs
 results
 results*/
 aux_results
-plots/svg
+plots/*svg
 plots/pdf
 *.zip
 *csv
