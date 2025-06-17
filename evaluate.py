@@ -2,8 +2,10 @@ from math import sqrt
 from pathlib import Path
 import pandas as pd
 import numpy as np
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 import matplotlib.pyplot as plt
 import dataclasses
+from matplotlib.patches import Rectangle
 from scipy.stats import binomtest
 import seaborn as sns
 import yaml
@@ -11,8 +13,13 @@ import functools as ft
 from typing import Literal
 from scipy.optimize import minimize_scalar
 from helpers import df_from, RUN_NAME
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import seaborn as sns
+from matplotlib.patches import Rectangle
 
-plt.rcParams.update({"font.size": 12})
+plt.rcParams.update({"font.size": 16})
 
 
 @ft.lru_cache
@@ -74,29 +81,10 @@ def make_agg(version):
 
 
 def plot_save(name):
-    plt.tight_layout()
     Path("plots/png").mkdir(parents=True, exist_ok=True)
     plt.savefig(f"plots/{name}.svg")
     plt.savefig(f"plots/png/{name}.png", dpi=160)
     plt.close()
-
-
-def make_theoretical(ax, x_values, kind: Literal["slow", "fast"], param: float, K=None, n=None):
-    assert K is not None or n is not None
-    if kind == "slow":
-        if K is not None:
-            y = [1 - (1 - param**n_val) ** K for n_val in x_values]
-        else:
-            y = [1 - (1 - param**n) ** K_val for K_val in x_values]
-        label = f"$1 - (1 - {param:.3f}^n)^K$"
-    else:
-        if K is not None:
-            y = [1 - (1 - param**K) ** n_val for n_val in x_values]
-        else:
-            y = [1 - (1 - param**K_val) ** n for K_val in x_values]
-
-        label = f"$(1 - {param:.2f})^K)^n$"
-    return y, label
 
 
 def ax_set_log_scale(ax, m1=False):
@@ -115,155 +103,131 @@ def ax_set_log_scale(ax, m1=False):
 
 
 def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
-    agg = make_agg(RUN_NAME)
+    # ------------- your data ------------------------------------------------
+    agg = make_agg(RUN_NAME).query("ensemble_size <= 40")
     kinds = ["boot", "bootrp"]
-    palette = "crest"
-    
-    # Color setup for frontier
-    cmap_points = sns.color_palette(palette, as_cmap=True)
+
+    cmap = plt.get_cmap("viridis_r")
     norm = plt.Normalize(0, 1)
-    
-    n_levels = len(p_levels)
-    cmap_line = plt.get_cmap(palette)
-    colour_idx = np.linspace(0.25, 0.85, n_levels)
-    curve_cols = [cmap_line(i) for i in colour_idx]
-    
-    all_hardnesses = np.sort(
-        np.array(list(agg["hardness"].unique()) + [agg["hardness"].max() * 1.11])
+    curve_cols = [cmap(t) for t in np.linspace(0.15, 0.85, len(p_levels))]
+    all_hardnesses = np.sort(np.r_[agg["hardness"].unique(), agg["hardness"].max() * 1.11])
+
+    ens_min, ens_max = agg["ensemble_size"].agg(["min", "max"])
+    hard_min, hard_max = agg["hardness"].agg(["min", "max"])
+
+    # ------------- layout: 3 × 2 gridspec -----------------------------------
+    fig = plt.figure(figsize=(14, 10), tight_layout=True)
+    gs = gridspec.GridSpec(
+        3, 2, height_ratios=[10, 10, 1.5], left=0.05, right=0.95, top=0.95, bottom=0.05
     )
-    
-    # Heatmap color setup
-    cmap_heatmap = sns.color_palette("Blues", as_cmap=True)
-    
-    # Create subplots with 2 rows, 2 columns
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12), sharex=True)
-    
-    # Get data bounds
-    max_ens_size = agg["ensemble_size"].max()
-    min_ens_size = agg["ensemble_size"].min()
-    max_hardness = agg["hardness"].max()
-    min_hardness = agg["hardness"].min()
-    x_min, x_max = agg["ensemble_size"].agg(["min", "max"])
-    y_min, y_max = agg["hardness"].agg(["min", "max"])
-    
+
+    ax_heat = [fig.add_subplot(gs[0, c]) for c in range(2)]
+    ax_front = [fig.add_subplot(gs[1, c]) for c in range(2)]
+    ax_legend = fig.add_subplot(gs[2, :])  # spans BOTH columns
+    ax_legend.axis("off")  # text only, no frame
+
+    # ------------- plotting loop --------------------------------------------
     for i, kind in enumerate(kinds):
-        # Top row: heatmaps
-        ax_heat = axes[0, i]
-        # Bottom row: frontiers
-        ax_front = axes[1, i]
-        
-        df_kind = agg.query(f"kind == '{kind}'")
-        
-        # --- HEATMAP (top row) ---
-        duplicates = df_kind[df_kind.duplicated(subset=["hardness", "ensemble_size"], keep=False)]
-        if len(duplicates) != 0:
-            print(duplicates.head(), duplicates["ensemble_size"], duplicates["hardness"])
-            breakpoint()
-        
-        pivot_data = df_kind.pivot(
-            index="hardness", columns="ensemble_size", values="weak_convergence"
-        )
-        
-        uniform_index = np.arange(min_hardness, max_hardness + 1)
-        uniform_columns = np.arange(min_ens_size, max_ens_size + 1)
-        uniform_df = pivot_data.reindex(index=uniform_index, columns=uniform_columns)
-        
-        interpolated_data = (
-            uniform_df.interpolate(method="nearest", limit_direction="both", axis=0).ffill().bfill()
-        )
-        interpolated_data = (
-            interpolated_data.interpolate(method="nearest", limit_direction="both", axis=1)
+        df = agg.query(f"kind == '{kind}'")
+
+        # ---- heat-map (top row)
+        piv = df.pivot(index="hardness", columns="ensemble_size", values="weak_convergence")
+
+        ui = np.arange(hard_min, hard_max + 1)
+        uc = np.arange(ens_min, ens_max + 1)
+        full = piv.reindex(index=ui, columns=uc)
+        interp = (
+            full.interpolate("nearest", axis=0, limit_direction="both")
+            .ffill()
+            .bfill()
+            .interpolate("nearest", axis=1, limit_direction="both")
             .ffill()
             .bfill()
         )
-        
-        sns.heatmap(
-            interpolated_data,
-            ax=ax_heat,
-            cmap=cmap_heatmap,
-            vmin=0,
-            vmax=1.0,
-            cbar=False,
-            xticklabels=False,
-            yticklabels=False,
+
+        sns.heatmap(interp, ax=ax_heat[i], cmap=cmap, vmin=0, vmax=1, cbar=False, rasterized=True)
+
+        # tidy tick labels
+        wanted_x = [5, 10, 15, 20, 25, 30, 35, 40]
+        ax_heat[i].set_xticks(wanted_x)
+        start_h = (hard_min // 5) * 5
+        wanted_y = np.arange(start_h, hard_max + 5, 5)
+        have_y = [h for h in wanted_y if h in ui]
+        ax_heat[i].set_yticks([np.where(ui == h)[0][0] + 0.5 for h in have_y])
+        ax_heat[i].set_yticklabels(have_y)
+        ax_heat[i].invert_yaxis()
+        ax_heat[i].set_xlabel("")
+        if i == 0:
+            ax_heat[i].set_ylabel("Hardness, n")
+        else:
+            ax_heat[i].set_ylabel("")
+        ax_heat[i].set_title(
+            ("BDQN" if kind == "boot" else "RP-BDQN") + " Probability of Discovery"
         )
-        
-        ax_heat.set_xticks(
-            np.interp(pivot_data.columns, uniform_columns, np.arange(len(uniform_columns))) + 0.5
-        )
-        ax_heat.set_xticklabels([f"{x}" for x in pivot_data.columns])
-        
-        ax_heat.set_yticks(
-            np.interp(pivot_data.index, uniform_index, np.arange(len(uniform_index))) + 0.5
-        )
-        ax_heat.set_yticklabels(pivot_data.index.astype(int))
-        ax_heat.invert_yaxis()
-        
-        if kind == "boot":
-            ax_heat.set_title("Probability of Discovery for BDQN")
-        if kind == "bootrp":
-            ax_heat.set_title("Probability of Discovery for RP-BDQN")
-        ax_heat.set_ylabel("Hardness (n)")
-        
-        # --- FRONTIER (bottom row) ---
-        # empirical points
-        ax_front.scatter(
-            df_kind["ensemble_size"],
-            df_kind["hardness"],
-            c=df_kind["weak_convergence"],
-            cmap=cmap_points,
+
+        # ---- frontier (middle row)
+        sc = ax_front[i].scatter(
+            df["ensemble_size"],
+            df["hardness"],
+            c=df["weak_convergence"],
+            cmap=cmap,
             norm=norm,
-            edgecolor="none",
             s=45,
+            edgecolor="none",
             alpha=0.7,
             rasterized=True,
         )
-        
-        # theoretical frontiers
-        beta, *_ = _fit_beta(df_kind, kind)
-        for p, col in zip(p_levels, curve_cols):
-            fr = compute_frontier(df_kind, kind, p, all_hardnesses)
-            if not fr.empty:
-                ax_front.plot(
-                    fr["ensemble_size"],
-                    fr["hardness"],
-                    linestyle="--",
-                    linewidth=3,
-                    color=col,
-                    label=f"p={p:.2f}",
-                )
-        
-        ax_front.set_xlabel("Ensemble Size (K)")
+
+        beta, *_ = _fit_beta(df, kind)
+        for p, colr in zip(p_levels, curve_cols):
+            fr = compute_frontier(df, kind, p, all_hardnesses)
+            if fr.empty:
+                continue
+            lbl = f"p={p:.2f}" if kind == "bootrp" else None
+            ax_front[i].plot(
+                fr["ensemble_size"], fr["hardness"], ls="--", lw=3, color=colr, label=lbl
+            )
+
+        ax_front[i].set_xlim(ens_min, ens_max)
+        ax_front[i].set_ylim(hard_min, hard_max * 1.05)
+        ax_front[i].grid(ls=":", lw=0.4)
+        ax_front[i].set_xlabel("Ensemble Size, K")
+        if i == 0:
+            ax_front[i].set_ylabel("Hardness, n")
+
+        name = "BDQN" if kind == "boot" else "RP-BDQN"
+        ax_front[i].set_title(f"{name} PoD vs $1-(1-{beta:.2f}^n)^K$")
+
         if kind == "bootrp":
-            ax_front.set_title(f"RP-BDQN vs $1 - (1 - {beta:.2f}^n)^" + "K$")
-        if kind == "boot":
-            ax_front.set_title(f"BDQN vs $1 - (1 - {beta:.2f}^n)^" + "K$")
-        ax_front.grid(True, ls=":", lw=0.4)
-        ax_front.legend(loc="lower right")
-        
-        ax_front.set_xlim(x_min, x_max)
-        ax_front.set_ylim(y_min, y_max * 1.05)
-    
-    axes[1, 0].set_ylabel("Hardness (n)")
-    
-    # Add colorbars
-    # Heatmap colorbar
-    mappable_heat = axes[0, 0].collections[0]
-    cbar_heat = fig.colorbar(mappable_heat, ax=axes[0, :], shrink=0.75, pad=0.03)
-    cbar_heat.set_label("Probability of Convergence", rotation=270, labelpad=20)
-    
-    # Frontier colorbar
-    cbar_front = fig.colorbar(
-        plt.cm.ScalarMappable(norm=norm, cmap=cmap_points),
-        ax=axes[1, :],
-        shrink=0.75,
-        pad=0.03,
+            ax_front[i].add_patch(
+                Rectangle((18, 30), 20, 10, lw=2, ec="red", ls="--", fc="none", zorder=6)
+            )
+
+        # ---- strip any per-axes legend safely
+        lg = ax_front[i].get_legend()
+        if lg is not None:
+            lg.remove()
+
+    # ------------- single, centred legend row ------------------------------
+    handles, labels = ax_front[1].get_legend_handles_labels()
+    if handles:  # only if RP-BDQN drew p-curves
+        ax_legend.legend(
+            handles, labels, loc="center", frameon=False, ncol=len(labels), handlelength=2.0
+        )
+
+    # ------------- shared colour-bar ---------------------------------------
+    mappable = ax_heat[0].collections[0]  # first heat-map artist
+    cbar = fig.colorbar(
+        mappable,
+        ax=ax_heat + ax_front,
+        orientation="vertical",
+        fraction=0.025,
+        pad=0.02,
+        shrink=0.83,
     )
-    cbar_front.set_label("Probability of Convergence", rotation=270, labelpad=20)
-    
+    cbar.set_label("Probability of Discovery (PoD)", rotation=270, labelpad=18)
+
     plot_save("frontier_and_heatmaps")
-    plt.tight_layout()
-    plt.show()
 
 
 def _fit_beta(df: pd.DataFrame, kind: str):
@@ -301,96 +265,13 @@ def compute_frontier(df: pd.DataFrame, kind: str, p: float, all_hardnesses) -> p
     return pd.DataFrame({"ensemble_size": k_vals[keep], "hardness": n_vals[keep]})
 
 
-def plot_scatter_with_frontier(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
-    agg = make_agg(RUN_NAME)
-    kinds = ["boot", "bootrp"]
-    palette = "crest"
-
-    # --- 1. single colour map for BOTH dots and lines ---------------------------
-    cmap_points = sns.color_palette(palette, as_cmap=True)  # keeps your dots
-    norm = plt.Normalize(0, 1)
-
-    # Pull N *distinct* colours out of the same cmap for the curves.
-    #   • skip the very light & very dark ends (harder to see on white/black)
-    #   • space them evenly so they’re visually distinct
-    n_levels = len(p_levels)
-    cmap_line = plt.get_cmap(palette)
-    colour_idx = np.linspace(0.25, 0.85, n_levels)  # tweak as you like
-    curve_cols = [cmap_line(i) for i in colour_idx]
-
-    all_hardnesses = np.sort(
-        np.array(list(agg["hardness"].unique()) + [agg["hardness"].max() * 1.11])
-    )
-
-    # --- 2. plotting ------------------------------------------------------------
-    fig, axes = plt.subplots(1, len(kinds), figsize=(14, 6), sharey=True)
-
-    x_min, x_max = agg["ensemble_size"].agg(["min", "max"])
-    y_min, y_max = agg["hardness"].agg(["min", "max"])
-
-    for ax, kind in zip(axes, kinds):
-        df = agg.query(f"kind == '{kind}'")
-
-        # empirical points
-        ax.scatter(
-            df["ensemble_size"],
-            df["hardness"],
-            c=df["weak_convergence"],
-            cmap=cmap_points,
-            norm=norm,
-            edgecolor="none",
-            s=45,
-            alpha=0.7,
-            rasterized=True,
-        )
-
-        # theoretical frontiers
-        beta, *_ = _fit_beta(df, kind)
-        for p, col in zip(p_levels, curve_cols):
-            fr = compute_frontier(df, kind, p, all_hardnesses)
-            if not fr.empty:
-                ax.plot(
-                    fr["ensemble_size"],
-                    fr["hardness"],
-                    linestyle="--",
-                    linewidth=3,
-                    color=col,
-                    label=f"p={p:.2f}",
-                )
-
-        ax.set_xlabel("Ensemble Size (K)")
-        if kind == "bootrp":
-            ax.set_title(f"RP-BDQN vs $1 - (1 - {beta:.2f}^n)^" + "K$")
-        if kind == "boot":
-            ax.set_title(f"BDQN vs $1 - (1 - {beta:.2f}^n)^" + "K$")
-        ax.grid(True, ls=":", lw=0.4)
-        ax.legend(loc="lower right")
-
-        ax.set_xlim(x_min, x_max)
-        ax.set_ylim(y_min, y_max * 1.05)
-
-    axes[0].set_ylabel("Hardness (n)")
-
-    cbar = fig.colorbar(
-        plt.cm.ScalarMappable(norm=norm, cmap=cmap_points),
-        ax=axes,
-        shrink=0.75,
-        pad=0.03,
-    )
-    cbar.set_label("Probability of Convergence", rotation=270, labelpad=20)
-
-    plot_save("frontier_theory_linear")
-    plt.tight_layout()
-    plt.show()
-
-
 def plot_residuals():
     # Use a clean style suitable for papers
     plt.style.use("seaborn-v0_8-whitegrid")
 
     agg = make_agg(RUN_NAME)
 
-    fig, ax = plt.subplots(1, 1, figsize=(7, 4.5))  # Standard figure size
+    fig, ax = plt.subplots(1, 1, figsize=(9, 5))  # Standard figure size
 
     kind_map = {"boot": "BDQN", "bootrp": "RP-BDQN"}
     # Use a color-blind friendly and distinct palette
@@ -437,11 +318,11 @@ def plot_residuals():
     ax.axvline(1, color="red", linestyle="--", linewidth=1.2, zorder=1, label="K=1 (Pure DQN)")
 
     # Formal, clear labels
-    ax.set_xlabel("Ensemble Size, $K$", fontsize=12)
-    ax.set_ylabel("Residual ($P_{pred} - P_{obs}$)", fontsize=12)
+    ax.set_xlabel("Ensemble Size, $K$")
+    ax.set_ylabel("Residual ($P_{pred} - P_{obs}$)")
 
     # Adjust ticks and legend
-    ax.tick_params(axis="both", which="major", labelsize=11)
+    ax.tick_params(axis="both", which="major")
 
     # Re-order legend handles to be more intuitive
     handles, labels = ax.get_legend_handles_labels()
@@ -450,9 +331,8 @@ def plot_residuals():
     ax.legend(
         [handles[idx] for idx in order],
         [labels[idx] for idx in order],
-        loc="upper right",
-        fontsize=11,
-        title="Method",
+        loc="lower right",
+        frameon=True,
     )
 
     # Set axis limits
@@ -528,10 +408,10 @@ def plot_diversity_collapse():
             )
 
     # 4. Final plot styling for publication
-    ax.set_xlabel("Training Episodes", fontsize=12)
-    ax.set_ylabel("Q-Diversity (higher is better)", fontsize=12)
-    ax.tick_params(axis="both", which="major", labelsize=11)
-    ax.legend(fontsize=11)
+    ax.set_xlabel("Training Episodes")
+    ax.set_ylabel("Q-Diversity (higher is better)")
+    ax.tick_params(axis="both", which="major")
+    ax.legend(frameon=True)
     ax.grid(True, which="both", linestyle=":", linewidth=0.6)
     ax.set_yscale("log")
 
