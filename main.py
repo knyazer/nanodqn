@@ -508,5 +508,5 @@ def exp_sweep():
 
 
 if __name__ == "__main__":
-    exp_heatmap()
     exp_sweep()
+    exp_heatmap()
