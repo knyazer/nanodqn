@@ -458,7 +458,7 @@ def exp_sweep():
         + list(range(20, 32, hardness_resolution * 4))
         + list(range(32, 100, hardness_resolution * 8))
     )
-    ens_sizes = [1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40]
+    ens_sizes = [1, 2, 3, 4, 6, 10, 16, 20, 24, 32]
 
     all_specs = [(x, y) for x, y in itertools.product(ens_sizes, hardnesses)]
 
@@ -499,9 +499,6 @@ def exp_sweep():
 
     for lr in [8e-5, 5e-4, 1e-3]:
         run(["boot", "bootrp"], lr=lr)
-
-    for batch_size in [16, 32, 128]:
-        run(["boot", "bootrp"], batch_size=batch_size)
 
     for rb_size in [5_000, 20_000, 40_000]:
         run(["boot", "bootrp"], rb_size=rb_size)
