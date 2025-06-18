@@ -1,3 +1,5 @@
+# runpod is not a standard executable - you can find it at https://github.com/knyazer/config
+
 runpod_start:
   runpod start --bid 0.42 --gpuCount 2 # set to your default config
 
