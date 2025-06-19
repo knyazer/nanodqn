@@ -440,7 +440,7 @@ def exp_heatmap():
             if results is not None:
                 if results["weak_convergence"].sum() == 0:
                     skip_counter += 1
-                    print("Current skip counter is {skip_counter}")
+                    print(f"Current skip counter is {skip_counter}")
 
                 if results["weak_convergence"].mean() == 1:
                     print(f"Setting new full hardness: {hardness}")
