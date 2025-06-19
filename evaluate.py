@@ -20,6 +20,17 @@ import seaborn as sns
 from matplotlib.patches import Rectangle
 
 plt.rcParams.update({"font.size": 7})
+plt.rcParams.update(
+    {
+        "text.usetex": True,
+        "font.family": "serif",
+        "text.latex.preamble": r"""
+        \usepackage{newtxtext} % Text font (Times)
+        \usepackage{newtxmath}  % Math font (Times)
+        \usepackage{amsmath}
+    """,
+    }
+)
 
 
 @ft.lru_cache
@@ -115,10 +126,9 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
     ens_min, ens_max = agg["ensemble_size"].agg(["min", "max"])
     hard_min, hard_max = agg["hardness"].agg(["min", "max"])
 
-    # ------------- layout: 3 × 2 gridspec -----------------------------------
-    fig = plt.figure(figsize=(5.5, 5.2), tight_layout=True)
+    fig = plt.figure(figsize=(5.5, 4), tight_layout=True)
     gs = gridspec.GridSpec(
-        3, 2, height_ratios=[10, 10, 1], left=0.05, right=0.95, top=0.95, bottom=0.05
+        3, 2, height_ratios=[10, 10, 0.0], left=0.08, right=0.95, top=0.92, bottom=0.05, hspace=0.7
     )
 
     ax_heat = [fig.add_subplot(gs[0, c]) for c in range(2)]
@@ -148,22 +158,19 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
         sns.heatmap(interp, ax=ax_heat[i], cmap=cmap, vmin=0, vmax=1, cbar=False, rasterized=True)
 
         # tidy tick labels
-        wanted_x = [5, 10, 15, 20, 25, 30, 35, 40]
+        wanted_x = [1, 10, 20, 30, 40]
         ax_heat[i].set_xticks(wanted_x)
-        ax_heat[i].set_xticklabels(wanted_x)
-        start_h = (hard_min // 5) * 5
-        wanted_y = np.arange(start_h, hard_max + 5, 5)
+        ax_heat[i].set_xticklabels(wanted_x, rotation=0)
+        start_h = (hard_min // 10) * 10
+        wanted_y = np.arange(start_h, hard_max + 5, 10)
         have_y = [h for h in wanted_y if h in ui]
         ax_heat[i].set_yticks([np.where(ui == h)[0][0] + 0.5 for h in have_y])
-        ax_heat[i].set_yticklabels(have_y)
+        ax_heat[i].set_yticklabels(have_y, rotation=0)
 
         ax_heat[i].invert_yaxis()
-        ax_heat[i].set_xlabel("")
+        ax_heat[i].set_xlabel("Ensemble size, K")
 
-        if i == 0:
-            ax_heat[i].set_ylabel("Hardness, n")
-        else:
-            ax_heat[i].set_ylabel("")
+        ax_heat[i].set_ylabel("Hardness, n")
         ax_heat[i].set_title(
             ("BDQN" if kind == "boot" else "RP-BDQN") + " Probability of Discovery"
         )
@@ -176,7 +183,8 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
             cmap=cmap,
             norm=norm,
             s=10,
-            edgecolor="black",
+            edgecolor="#aaa",
+            linewidths=0.3,
         )
 
         beta, *_ = _fit_beta(df, kind)
@@ -184,28 +192,23 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
             fr = compute_frontier(df, kind, p, all_hardnesses)
             if fr.empty:
                 continue
-            lbl = f"p={p:.2f}" if kind == "bootrp" else None
+            lbl = f"PoD={p:.2f}" if kind == "bootrp" else None
             ax_front[i].plot(
                 fr["ensemble_size"], fr["hardness"], ls="--", lw=2, color=colr, label=lbl
             )
 
-        ax_front[i].set_xlim(ens_min, ens_max)
-        ax_front[i].set_ylim(hard_min, hard_max * 1.05)
+        ax_front[i].set_xlim(ens_min * 0.8, ens_max * 1.2)
+        ax_front[i].set_ylim(hard_min * 0.5, hard_max * 1.05)
         ax_front[i].grid(ls=":", lw=0.4)
         ax_front[i].set_xlabel("Ensemble Size, K")
-        if i == 0:
-            ax_front[i].set_ylabel("Hardness, n")
+        ax_front[i].set_ylabel("Hardness, n")
+
         ax_front[i].set_xscale("log")
         ax_front[i].set_xticks([1, 2, 4, 8, 16, 32])
         ax_front[i].set_xticklabels([1, 2, 4, 8, 16, 32])
 
         name = "BDQN" if kind == "boot" else "RP-BDQN"
-        ax_front[i].set_title(f"{name} PoD vs $1-(1-{beta:.2f}^n)^K$")
-
-        if kind == "bootrp":
-            ax_front[i].add_patch(
-                Rectangle((18, 30), 20, 10, lw=2, ec="red", ls="--", fc="none", zorder=6)
-            )
+        ax_front[i].set_title(f"{name} vs $\psi={beta:.2f}$ law")
 
         # ---- strip any per-axes legend safely
         lg = ax_front[i].get_legend()
@@ -215,7 +218,14 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
     # ------------- single, centred legend row ------------------------------
     handles, labels = ax_front[1].get_legend_handles_labels()
     if handles:  # only if RP-BDQN drew p-curves
-        ax_legend.legend(handles, labels, loc="center", ncol=len(labels), handlelength=2.0)
+        ax_legend.legend(
+            handles,
+            labels,
+            loc="center",
+            ncol=len(labels),
+            handlelength=2.0,
+            bbox_to_anchor=(0.5, 0.5),
+        )
 
     # ------------- shared colour-bar ---------------------------------------
     mappable = ax_heat[0].collections[0]  # first heat-map artist
@@ -224,7 +234,7 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
         ax=ax_heat + ax_front,
         orientation="vertical",
         fraction=0.025,
-        pad=0.02,
+        pad=0.04,
         shrink=0.83,
     )
     cbar.set_label("Probability of Discovery (PoD)", rotation=270, labelpad=18)
