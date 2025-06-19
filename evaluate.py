@@ -253,22 +253,29 @@ def plot_frontier_and_heatmaps(
     plot_save("frontier_and_heatmaps", prefix=plot_prefix)
 
 
-def _fit_beta(df: pd.DataFrame, kind: str):
+def _fit_beta(df: pd.DataFrame, kind: str, bootstrap_uncertainty: bool = False):
     df = df[df["ensemble_size"] > 1]
 
-    def negloglike(beta):
+    def negloglike_for_df(data_df, beta):
         if beta <= 0 or beta >= 1:
             return 1e18
-        p = 1 - (1 - beta ** df["hardness"]) ** df["ensemble_size"]
+        p = 1 - (1 - beta ** data_df["hardness"]) ** data_df["ensemble_size"]
         p = np.clip(p, 1e-15, 1 - 1e-15)  # prevent log(0)
-        k = df["weak_convergence"] * 32  # successes out of 32 trials
+        k = data_df["weak_convergence"] * 32  # successes out of 32 trials
         n = 32
         return -np.sum(k * np.log(p) + (n - k) * np.log1p(-p))
 
-    res = minimize_scalar(negloglike, bounds=(1e-6, 1 - 1e-6), method="bounded")
-    beta = res.x
+    def fit_beta_for_df(data_df):
+        def negloglike(beta):
+            return negloglike_for_df(data_df, beta)
 
-    # compute predicted vs observed
+        res = minimize_scalar(negloglike, bounds=(1e-6, 1 - 1e-6), method="bounded")
+        return res.x
+
+    # Fit beta on original data
+    beta = fit_beta_for_df(df)
+
+    # compute predicted vs observed for original data
     p_hat = 1 - (1 - beta ** df["hardness"]) ** df["ensemble_size"]
 
     y = df["weak_convergence"].values
@@ -276,9 +283,32 @@ def _fit_beta(df: pd.DataFrame, kind: str):
     ss_res = np.sum((y - p_hat) ** 2)
     ss_tot = np.sum((y - np.mean(y)) ** 2)
     r2 = 1 - ss_res / ss_tot
-    print(f"Kind={kind} gets r2={r2} and mse={mse} for beta={beta}")
 
-    return beta, mse, r2
+    if bootstrap_uncertainty:
+        # Bootstrap resampling
+        n_bootstrap = 50
+        bootstrap_betas = []
+
+        for _ in range(n_bootstrap):
+            # Resample data with replacement
+            bootstrap_df = df.sample(n=len(df), replace=True)
+            bootstrap_beta = fit_beta_for_df(bootstrap_df)
+            bootstrap_betas.append(bootstrap_beta)
+
+        bootstrap_betas = np.array(bootstrap_betas)
+
+        # Compute 80% confidence interval (10th and 90th percentiles)
+        ci_lower = np.percentile(bootstrap_betas, 10)
+        ci_upper = np.percentile(bootstrap_betas, 90)
+
+        print(
+            f"Kind={kind} gets r2={r2} and mse={mse} for beta={beta} (80% CI: [{ci_lower:.6f}, {ci_upper:.6f}])"
+        )
+
+        return beta, mse, r2, (ci_lower, ci_upper)
+    else:
+        print(f"Kind={kind} gets r2={r2} and mse={mse} for beta={beta}")
+        return beta, mse, r2
 
 
 def compute_frontier(df: pd.DataFrame, kind: str, p: float, all_hardnesses) -> pd.DataFrame:
@@ -486,16 +516,33 @@ def plot_hyperparameter_sweep():
         for j, kind in enumerate(kinds):
             df_kind = df_agg.query(f"kind == '{kind}'")
             betas = []
+            ci_lowers = []
+            ci_uppers = []
 
             for value in values:
                 df_subset = df_kind.query(f"{hp} == {value}")
                 if not df_subset.empty:
-                    beta, _, _ = _fit_beta(df_subset, kind)
+                    result = _fit_beta(df_subset, kind, bootstrap_uncertainty=True)
+                    beta, _, _, (ci_lower, ci_upper) = result
                     betas.append(beta)
+                    ci_lowers.append(ci_lower)
+                    ci_uppers.append(ci_upper)
                 else:
                     betas.append(0)
+                    ci_lowers.append(0)
+                    ci_uppers.append(0)
 
             offset = (j - 0.5) * width if len(kinds) == 2 else 0
+
+            # Calculate error bar values (distance from beta to confidence bounds)
+            yerr_lower = [
+                max(0, beta - ci_lower) if beta > 0 else 0
+                for beta, ci_lower in zip(betas, ci_lowers)
+            ]
+            yerr_upper = [
+                ci_upper - beta if beta > 0 else 0 for beta, ci_upper in zip(betas, ci_uppers)
+            ]
+
             bars = ax.bar(
                 x_pos + offset,
                 betas,
@@ -503,6 +550,18 @@ def plot_hyperparameter_sweep():
                 label=kind_names[kind],
                 color=kind_colors[kind],
                 alpha=0.8,
+            )
+
+            # Add error bars
+            ax.errorbar(
+                x_pos + offset,
+                betas,
+                yerr=[yerr_lower, yerr_upper],
+                fmt="none",
+                capsize=3,
+                capthick=0.5,
+                ecolor="black",
+                alpha=0.5,
             )
 
             for bar, beta in zip(bars, betas):
@@ -562,8 +621,8 @@ def plot_hyperparameter_sweep():
 
 
 if __name__ == "__main__":
-    plot_frontier_and_heatmaps()
     plot_hyperparameter_sweep()
+    plot_frontier_and_heatmaps()
     plot_diversity_collapse()
     plot_residuals()
     for hp, values, kinds in hp_and_ranges:
