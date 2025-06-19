@@ -458,7 +458,7 @@ def exp_sweep():
         + list(range(20, 32, hardness_resolution * 4))
         + list(range(32, 100, hardness_resolution * 8))
     )
-    ens_sizes = [1, 2, 3, 4, 6, 10, 16, 20, 24, 32]
+    ens_sizes = [1, 2, 3, 4, 6, 10, 16, 20, 24, 32, 40]
 
     all_specs = [(x, y) for x, y in itertools.product(ens_sizes, hardnesses)]
 
