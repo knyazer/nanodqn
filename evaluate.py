@@ -19,15 +19,17 @@ import matplotlib.gridspec as gridspec
 import seaborn as sns
 from matplotlib.patches import Rectangle
 
-plt.rcParams.update({"font.size": 7})
+plt.rcParams.update({"font.size": 8})
+# This is the most important part.
 plt.rcParams.update(
     {
-        "text.usetex": True,
-        "font.family": "serif",
+        "text.usetex": True,  # Use LaTeX to render all text
+        "font.family": "serif",  # Use serif font family
+        # Match the preamble of your document
         "text.latex.preamble": r"""
-        \usepackage{newtxtext} % Text font (Times)
-        \usepackage{newtxmath}  % Math font (Times)
+        \usepackage[T1]{fontenc}
         \usepackage{amsmath}
+        \usepackage{amssymb}
     """,
     }
 )
@@ -94,7 +96,7 @@ def make_agg(version):
 def plot_save(name):
     Path("plots/png").mkdir(parents=True, exist_ok=True)
     plt.savefig(f"plots/{name}.svg")
-    plt.savefig(f"plots/png/{name}.png", dpi=160)
+    plt.savefig(f"plots/png/{name}.png", dpi=320)
     plt.close()
 
 
@@ -114,7 +116,6 @@ def ax_set_log_scale(ax, m1=False):
 
 
 def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
-    # ------------- your data ------------------------------------------------
     agg = make_agg(RUN_NAME).query("ensemble_size <= 40")
     kinds = ["boot", "bootrp"]
 
@@ -371,8 +372,8 @@ def plot_diversity_collapse():
     kind_map = {"boot": "BDQN", "bootrp": "RP-BDQN"}
     palette = sns.color_palette("colorblind", n_colors=8)
     outcomes = {
-        "converged": ("solid", "Converged"),
-        "not_converged": ("dashed", "Failed"),
+        "converged": ("solid", "Convergent"),
+        "not_converged": ("dashed", "Non-convergent"),
     }
 
     for i, (kind_code, kind_name) in enumerate(kind_map.items()):
@@ -442,28 +443,24 @@ def plot_diversity_collapse():
     plot_save("collapse")
 
 
-def log(name):
-    agg = make_agg(name)
+def hyperparameter_sweep():
+    df_agg = make_agg("sweep")
+    hp_and_ranges = [
+        ("rb_size", [5_000, 20_000, 40_000], ["boot", "bootrp"]),
+        ("lr", [8e-5, 5e-4, 1e-3], ["boot", "bootrp"]),
+        ("prior_scale", [1.0, 5.0, 10.0], ["bootrp"]),
+    ]
 
-    kinds = ["boot", "bootrp"]
-    print(kinds)
-    for hardness in sorted(agg["hardness"].unique()):
-        for ens_size in sorted(agg["ensemble_size"].unique()):
-            df = agg.query(f"hardness == {hardness} and ensemble_size == {ens_size}")
-            print(f"hardness={hardness},K={ens_size}: \t", end="")
-            for kind in kinds:
-                fdf = df.loc[df["kind"] == kind, "weak_convergence"]
-                v = fdf.iloc[0] if not fdf.empty else None
-                if v is not None:
-                    print(f"{f'{v:.3f}':<10}", end="\t")
-                else:
-                    print(f"{'undefined':<10}", end="\t")
-            print()
+    fig, axes = plt.subplots(3, 1, figsize=(5.5, 3), tight_layout=True)  # Paper-ready figure size
+    for hp, values, kind in hp_and_ranges:
+        df = df_agg.query("kind == @kind")
+        # for each axis plot the fitted beta as a bar plot;
+        # each sublot should have 6 bars, alternating boot and bootdqn for each set of
+        # the hyperparameter. Write comprehensive labels. The colors should be the standard ones used in
+        # other plots
 
 
 if __name__ == "__main__":
     plot_diversity_collapse()
     plot_residuals()
     plot_frontier_and_heatmaps()
-
-    log(RUN_NAME)
