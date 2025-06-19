@@ -454,13 +454,13 @@ def plot_hyperparameter_sweep():
         ("prior_scale", [1.0, 5.0, 10.0], ["bootrp"]),
     ]
 
-    fig = plt.figure(figsize=(5.5, 2.5))
+    fig = plt.figure(figsize=(5.5, 2.2))
     gs = gridspec.GridSpec(
         2,
         3,
         figure=fig,
         bottom=0.2,
-        top=0.85,
+        top=0.98,
         left=0.08,
         right=0.95,
         wspace=0.5,
@@ -550,11 +550,8 @@ def plot_hyperparameter_sweep():
         legend_ax = fig.add_subplot(gs[1, :])
         legend_ax.axis("off")
         legend_ax.legend(
-            handles, labels, loc="center", ncol=2, bbox_to_anchor=(0.5, -2.0), frameon=False
+            handles, labels, loc="center", ncol=2, bbox_to_anchor=(0.5, -1.6), frameon=False
         )
-
-    # Add overarching title
-    fig.suptitle("The Scaling Law per Hyperparameter Configuration", y=0.95)
 
     plot_save("hyperparameter_sweep")
 
