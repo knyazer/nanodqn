@@ -19,7 +19,7 @@ import matplotlib.gridspec as gridspec
 import seaborn as sns
 from matplotlib.patches import Rectangle
 
-plt.rcParams.update({"font.size": 8})
+plt.rcParams.update({"font.size": 7})
 # This is the most important part.
 plt.rcParams.update(
     {
@@ -69,6 +69,8 @@ def make_agg(version):
                 "hardness": cfg.hardness,
                 "kind": cfg.kind,
                 "prior_scale": cfg.prior_scale,
+                "rb_size": cfg.rb_size,
+                "lr": cfg.lr,
             }
         if ver == 3:
             if df["weak_convergence"].sum() != 0:
@@ -443,7 +445,7 @@ def plot_diversity_collapse():
     plot_save("collapse")
 
 
-def hyperparameter_sweep():
+def plot_hyperparameter_sweep():
     df_agg = make_agg("sweep")
     hp_and_ranges = [
         ("rb_size", [5_000, 20_000, 40_000], ["boot", "bootrp"]),
@@ -451,16 +453,113 @@ def hyperparameter_sweep():
         ("prior_scale", [1.0, 5.0, 10.0], ["bootrp"]),
     ]
 
-    fig, axes = plt.subplots(3, 1, figsize=(5.5, 3), tight_layout=True)  # Paper-ready figure size
-    for hp, values, kind in hp_and_ranges:
-        df = df_agg.query("kind == @kind")
-        # for each axis plot the fitted beta as a bar plot;
-        # each sublot should have 6 bars, alternating boot and bootdqn for each set of
-        # the hyperparameter. Write comprehensive labels. The colors should be the standard ones used in
-        # other plots
+    fig = plt.figure(figsize=(5.5, 2.5))
+    gs = gridspec.GridSpec(
+        2,
+        3,
+        figure=fig,
+        bottom=0.2,
+        top=0.85,
+        left=0.08,
+        right=0.95,
+        wspace=0.5,
+        hspace=0.05,
+        height_ratios=[10, 1],
+    )
+    axes = [fig.add_subplot(gs[0, i]) for i in range(3)]
+    palette = sns.color_palette("colorblind", n_colors=8)
+    kind_colors = {"boot": palette[2], "bootrp": palette[3]}
+    kind_names = {"boot": "BDQN", "bootrp": "RP-BDQN"}
+
+    for i, (hp, values, kinds) in enumerate(hp_and_ranges):
+        ax = axes[i]
+
+        x_pos = np.arange(len(values))
+        width = 0.35
+
+        for j, kind in enumerate(kinds):
+            df_kind = df_agg.query(f"kind == '{kind}'")
+            betas = []
+
+            for value in values:
+                df_subset = df_kind.query(f"{hp} == {value}")
+                if not df_subset.empty:
+                    beta, _, _ = _fit_beta(df_subset, kind)
+                    betas.append(beta)
+                else:
+                    betas.append(0)
+
+            offset = (j - 0.5) * width if len(kinds) == 2 else 0
+            bars = ax.bar(
+                x_pos + offset,
+                betas,
+                width,
+                label=kind_names[kind],
+                color=kind_colors[kind],
+                alpha=0.8,
+            )
+
+            for bar, beta in zip(bars, betas):
+                if beta > 0:
+                    ax.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.001,
+                        f"{beta:.3f}",
+                        ha="center",
+                        va="bottom",
+                        fontsize=6,
+                    )
+
+        if hp == "lr":
+            ax.set_xlabel("Learning Rate")
+        if hp == "rb_size":
+            ax.set_xlabel("Replay Buffer Size")
+        if hp == "prior_scale":
+            ax.set_xlabel("Prior Scale")
+        ax.set_ylabel("Fitted $\psi$")
+        ax.set_xticks(x_pos)
+
+        if hp == "rb_size":
+            ax.set_xticklabels([f"{int(v / 1000)}K" for v in values])
+        elif hp == "lr":
+            ax.set_xticklabels([f"{v:.0e}" for v in values])
+        else:
+            ax.set_xticklabels([f"{v}" for v in values])
+
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(0, max(ax.get_ylim()[1] + 0.1, 0.1))
+
+    # Create a shared legend below the subplots
+    # Get handles and labels from the first axis that has both kinds
+    handles, labels = None, None
+    for ax in axes:
+        h, l = ax.get_legend_handles_labels()
+        if len(h) >= 2:  # Found axis with both BDQN and RP-BDQN
+            handles, labels = h, l
+            break
+
+    # Remove individual legends
+    for ax in axes:
+        legend = ax.get_legend()
+        if legend:
+            legend.remove()
+
+    # Add shared legend if we found handles
+    if handles and labels:
+        legend_ax = fig.add_subplot(gs[1, :])
+        legend_ax.axis("off")
+        legend_ax.legend(
+            handles, labels, loc="center", ncol=2, bbox_to_anchor=(0.5, -2.0), frameon=False
+        )
+
+    # Add overarching title
+    fig.suptitle("The Scaling Law per Hyperparameter Configuration", y=0.95)
+
+    plot_save("hyperparameter_sweep")
 
 
 if __name__ == "__main__":
+    plot_hyperparameter_sweep()
     plot_diversity_collapse()
     plot_residuals()
     plot_frontier_and_heatmaps()
