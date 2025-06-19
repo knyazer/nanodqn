@@ -148,6 +148,8 @@ def plot_frontier_and_heatmaps(
     ax_legend.axis("off")  # text only, no frame
 
     # ------------- plotting loop --------------------------------------------
+    fit_results = {}  # Store results for table display
+
     for i, kind in enumerate(kinds):
         df = agg.query(f"kind == '{kind}'")
 
@@ -198,7 +200,8 @@ def plot_frontier_and_heatmaps(
             linewidths=0.3,
         )
 
-        beta, *_ = _fit_beta(df, kind)
+        psi, mse, dispersion, r2 = _fit_psi(df, kind)
+        fit_results[kind] = {"psi": psi, "mse": mse, "dispersion": dispersion, "r2": r2}
         for p, colr in zip(p_levels, curve_cols):
             fr = compute_frontier(df, kind, p, all_hardnesses)
             if fr.empty:
@@ -219,7 +222,7 @@ def plot_frontier_and_heatmaps(
         ax_front[i].set_xticklabels([1, 2, 4, 8, 16, 32])
 
         name = "BDQN" if kind == "boot" else "RP-BDQN"
-        ax_front[i].set_title(f"{name} vs $\psi={beta:.2f}$ law")
+        ax_front[i].set_title(f"{name} vs $\psi={psi:.2f}$ law")
 
         # ---- strip any per-axes legend safely
         lg = ax_front[i].get_legend()
@@ -250,36 +253,71 @@ def plot_frontier_and_heatmaps(
     )
     cbar.set_label("Probability of Discovery (PoD)", rotation=270, labelpad=18)
 
+    # Display table only for main heatmap (not hyperparameter sweeps)
+    if plot_prefix is None and fit_results:
+        print("\n" + "=" * 72)
+        print("PSI FITTING RESULTS")
+        print("=" * 72)
+        print(f"{'Algorithm':<12} {'Psi (ψ)':<12} {'Dispersion':<12} {'R²':<12} {'MSE':<12}")
+        print("-" * 72)
+
+        kind_names = {"boot": "BDQN", "bootrp": "RP-BDQN"}
+        for kind in ["boot", "bootrp"]:
+            if kind in fit_results:
+                result = fit_results[kind]
+                print(
+                    f"{kind_names[kind]:<12} {result['psi']:<12.6f} {result['dispersion']:<12.3f} {result['r2']:<12.3f} {result['mse']:<12.6f}"
+                )
+        print("=" * 72)
+
     plot_save("frontier_and_heatmaps", prefix=plot_prefix)
 
 
-def _fit_beta(df: pd.DataFrame, kind: str, bootstrap_uncertainty: bool = False):
+def _fit_psi(df: pd.DataFrame, kind: str, bootstrap_uncertainty: bool = False):
     df = df[df["ensemble_size"] > 1]
 
-    def negloglike_for_df(data_df, beta):
-        if beta <= 0 or beta >= 1:
+    def negloglike_for_df(data_df, psi):
+        if psi <= 0 or psi >= 1:
             return 1e18
-        p = 1 - (1 - beta ** data_df["hardness"]) ** data_df["ensemble_size"]
+        p = 1 - (1 - psi ** data_df["hardness"]) ** data_df["ensemble_size"]
         p = np.clip(p, 1e-15, 1 - 1e-15)  # prevent log(0)
         k = data_df["weak_convergence"] * 32  # successes out of 32 trials
         n = 32
         return -np.sum(k * np.log(p) + (n - k) * np.log1p(-p))
 
-    def fit_beta_for_df(data_df):
-        def negloglike(beta):
-            return negloglike_for_df(data_df, beta)
+    def fit_psi_for_df(data_df):
+        def negloglike(psi):
+            return negloglike_for_df(data_df, psi)
 
         res = minimize_scalar(negloglike, bounds=(1e-6, 1 - 1e-6), method="bounded")
         return res.x
 
-    # Fit beta on original data
-    beta = fit_beta_for_df(df)
+    # Fit psi on original data
+    psi = fit_psi_for_df(df)
 
     # compute predicted vs observed for original data
-    p_hat = 1 - (1 - beta ** df["hardness"]) ** df["ensemble_size"]
+    p_hat = 1 - (1 - psi ** df["hardness"]) ** df["ensemble_size"]
 
     y = df["weak_convergence"].values
     mse = np.mean((p_hat - y) ** 2)
+
+    # Compute Pearson chi-squared dispersion factor
+    # For binomial data: chi^2 = sum((observed - expected)^2 / (expected * (1 - expected) / n))
+    # where n = 32 (number of trials)
+    n_trials = 32
+    expected_successes = p_hat * n_trials
+    observed_successes = y * n_trials
+
+    # Variance for binomial: n * p * (1 - p)
+    variance = n_trials * p_hat * (1 - p_hat)
+    # Avoid division by zero
+    variance = np.maximum(variance, 1e-10)
+
+    chi2 = np.sum((observed_successes - expected_successes) ** 2 / variance)
+    degrees_of_freedom = len(df) - 1  # -1 for the fitted parameter (psi)
+    dispersion_factor = chi2 / degrees_of_freedom if degrees_of_freedom > 0 else np.inf
+
+    # Compute R²
     ss_res = np.sum((y - p_hat) ** 2)
     ss_tot = np.sum((y - np.mean(y)) ** 2)
     r2 = 1 - ss_res / ss_tot
@@ -287,35 +325,30 @@ def _fit_beta(df: pd.DataFrame, kind: str, bootstrap_uncertainty: bool = False):
     if bootstrap_uncertainty:
         # Bootstrap resampling
         n_bootstrap = 50
-        bootstrap_betas = []
+        bootstrap_psis = []
 
         for _ in range(n_bootstrap):
             # Resample data with replacement
             bootstrap_df = df.sample(n=len(df), replace=True)
-            bootstrap_beta = fit_beta_for_df(bootstrap_df)
-            bootstrap_betas.append(bootstrap_beta)
+            bootstrap_psi = fit_psi_for_df(bootstrap_df)
+            bootstrap_psis.append(bootstrap_psi)
 
-        bootstrap_betas = np.array(bootstrap_betas)
+        bootstrap_psis = np.array(bootstrap_psis)
 
         # Compute 80% confidence interval (10th and 90th percentiles)
-        ci_lower = np.percentile(bootstrap_betas, 10)
-        ci_upper = np.percentile(bootstrap_betas, 90)
+        ci_lower = np.percentile(bootstrap_psis, 10)
+        ci_upper = np.percentile(bootstrap_psis, 90)
 
-        print(
-            f"Kind={kind} gets r2={r2} and mse={mse} for beta={beta} (80% CI: [{ci_lower:.6f}, {ci_upper:.6f}])"
-        )
-
-        return beta, mse, r2, (ci_lower, ci_upper)
+        return psi, mse, dispersion_factor, r2, (ci_lower, ci_upper)
     else:
-        print(f"Kind={kind} gets r2={r2} and mse={mse} for beta={beta}")
-        return beta, mse, r2
+        return psi, mse, dispersion_factor, r2
 
 
 def compute_frontier(df: pd.DataFrame, kind: str, p: float, all_hardnesses) -> pd.DataFrame:
-    beta, *_ = _fit_beta(df, kind)
+    psi, *_ = _fit_psi(df, kind)
     n_vals = all_hardnesses
 
-    k_vals = np.log(1 - p) / np.log(1 - beta**n_vals) + 1
+    k_vals = np.log(1 - p) / np.log(1 - psi**n_vals) + 1
 
     keep = (k_vals > 0) & np.isfinite(k_vals)
     return pd.DataFrame({"ensemble_size": k_vals[keep], "hardness": n_vals[keep]})
@@ -335,8 +368,8 @@ def plot_residuals():
         df = agg.query(f"kind == '{kind}'").copy()
 
         # --- 1. Calculate Predictions and Residuals (including K=1) ---
-        beta, *_ = _fit_beta(df, kind)
-        df["predicted"] = 1 - (1 - beta ** df["hardness"]) ** df["ensemble_size"]
+        psi, *_ = _fit_psi(df, kind)
+        df["predicted"] = 1 - (1 - psi ** df["hardness"]) ** df["ensemble_size"]
         df["residual"] = df["predicted"] - df["weak_convergence"]
 
         # --- 2. Group by K and get statistics ---
@@ -515,37 +548,36 @@ def plot_hyperparameter_sweep():
 
         for j, kind in enumerate(kinds):
             df_kind = df_agg.query(f"kind == '{kind}'")
-            betas = []
+            psis = []
             ci_lowers = []
             ci_uppers = []
 
             for value in values:
                 df_subset = df_kind.query(f"{hp} == {value}")
                 if not df_subset.empty:
-                    result = _fit_beta(df_subset, kind, bootstrap_uncertainty=True)
-                    beta, _, _, (ci_lower, ci_upper) = result
-                    betas.append(beta)
+                    result = _fit_psi(df_subset, kind, bootstrap_uncertainty=True)
+                    psi, _, _, _, (ci_lower, ci_upper) = result
+                    psis.append(psi)
                     ci_lowers.append(ci_lower)
                     ci_uppers.append(ci_upper)
                 else:
-                    betas.append(0)
+                    psis.append(0)
                     ci_lowers.append(0)
                     ci_uppers.append(0)
 
             offset = (j - 0.5) * width if len(kinds) == 2 else 0
 
-            # Calculate error bar values (distance from beta to confidence bounds)
+            # Calculate error bar values (distance from psi to confidence bounds)
             yerr_lower = [
-                max(0, beta - ci_lower) if beta > 0 else 0
-                for beta, ci_lower in zip(betas, ci_lowers)
+                max(0, psi - ci_lower) if psi > 0 else 0 for psi, ci_lower in zip(psis, ci_lowers)
             ]
             yerr_upper = [
-                ci_upper - beta if beta > 0 else 0 for beta, ci_upper in zip(betas, ci_uppers)
+                ci_upper - psi if psi > 0 else 0 for psi, ci_upper in zip(psis, ci_uppers)
             ]
 
             bars = ax.bar(
                 x_pos + offset,
-                betas,
+                psis,
                 width,
                 label=kind_names[kind],
                 color=kind_colors[kind],
@@ -555,7 +587,7 @@ def plot_hyperparameter_sweep():
             # Add error bars
             ax.errorbar(
                 x_pos + offset,
-                betas,
+                psis,
                 yerr=[yerr_lower, yerr_upper],
                 fmt="none",
                 capsize=3,
@@ -564,12 +596,12 @@ def plot_hyperparameter_sweep():
                 alpha=0.5,
             )
 
-            for bar, beta in zip(bars, betas):
-                if beta > 0:
+            for bar, psi in zip(bars, psis):
+                if psi > 0:
                     ax.text(
                         bar.get_x() + bar.get_width() / 2,
                         bar.get_height() + 0.001,
-                        f"{beta:.3f}",
+                        f"{psi:.3f}",
                         ha="center",
                         va="bottom",
                         fontsize=6,
