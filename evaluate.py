@@ -19,7 +19,7 @@ import matplotlib.gridspec as gridspec
 import seaborn as sns
 from matplotlib.patches import Rectangle
 
-plt.rcParams.update({"font.size": 16})
+plt.rcParams.update({"font.size": 7})
 
 
 @ft.lru_cache
@@ -107,7 +107,7 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
     agg = make_agg(RUN_NAME).query("ensemble_size <= 40")
     kinds = ["boot", "bootrp"]
 
-    cmap = plt.get_cmap("viridis_r")
+    cmap = sns.color_palette("Blues", as_cmap=True)
     norm = plt.Normalize(0, 1)
     curve_cols = [cmap(t) for t in np.linspace(0.15, 0.85, len(p_levels))]
     all_hardnesses = np.sort(np.r_[agg["hardness"].unique(), agg["hardness"].max() * 1.11])
@@ -116,7 +116,7 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
     hard_min, hard_max = agg["hardness"].agg(["min", "max"])
 
     # ------------- layout: 3 × 2 gridspec -----------------------------------
-    fig = plt.figure(figsize=(14, 10), tight_layout=True)
+    fig = plt.figure(figsize=(5.5, 4.2), tight_layout=True)
     gs = gridspec.GridSpec(
         3, 2, height_ratios=[10, 10, 1.5], left=0.05, right=0.95, top=0.95, bottom=0.05
     )
@@ -172,9 +172,8 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
             c=df["weak_convergence"],
             cmap=cmap,
             norm=norm,
-            s=45,
-            edgecolor="none",
-            alpha=0.7,
+            s=15,
+            edgecolor="black",
             rasterized=True,
         )
 
@@ -185,7 +184,7 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
                 continue
             lbl = f"p={p:.2f}" if kind == "bootrp" else None
             ax_front[i].plot(
-                fr["ensemble_size"], fr["hardness"], ls="--", lw=3, color=colr, label=lbl
+                fr["ensemble_size"], fr["hardness"], ls="--", lw=2, color=colr, label=lbl
             )
 
         ax_front[i].set_xlim(ens_min, ens_max)
@@ -211,9 +210,7 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
     # ------------- single, centred legend row ------------------------------
     handles, labels = ax_front[1].get_legend_handles_labels()
     if handles:  # only if RP-BDQN drew p-curves
-        ax_legend.legend(
-            handles, labels, loc="center", frameon=False, ncol=len(labels), handlelength=2.0
-        )
+        ax_legend.legend(handles, labels, loc="center", ncol=len(labels), handlelength=2.0)
 
     # ------------- shared colour-bar ---------------------------------------
     mappable = ax_heat[0].collections[0]  # first heat-map artist
@@ -271,7 +268,7 @@ def plot_residuals():
 
     agg = make_agg(RUN_NAME)
 
-    fig, ax = plt.subplots(1, 1, figsize=(9, 5))  # Standard figure size
+    fig, ax = plt.subplots(1, 1, figsize=(5.5, 3), tight_layout=True)  # Paper-ready figure size
 
     kind_map = {"boot": "BDQN", "bootrp": "RP-BDQN"}
     # Use a color-blind friendly and distinct palette
@@ -331,8 +328,9 @@ def plot_residuals():
     ax.legend(
         [handles[idx] for idx in order],
         [labels[idx] for idx in order],
-        loc="lower right",
-        frameon=True,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.15),
+        ncol=len(labels),
     )
 
     # Set axis limits
@@ -349,7 +347,7 @@ def plot_diversity_collapse():
     df_agg = make_agg(RUN_NAME)
     df_critical = df_agg.query("8 <= hardness <= 12 and 3 <= ensemble_size <= 6").copy()
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(5.5, 3), tight_layout=True)
 
     # 2. Setup aesthetics and loop variables
     kind_map = {"boot": "BDQN", "bootrp": "RP-BDQN"}
@@ -411,7 +409,7 @@ def plot_diversity_collapse():
     ax.set_xlabel("Training Episodes")
     ax.set_ylabel("Q-Diversity (higher is better)")
     ax.tick_params(axis="both", which="major")
-    ax.legend(frameon=True)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=4)
     ax.grid(True, which="both", linestyle=":", linewidth=0.6)
     ax.set_yscale("log")
 
