@@ -117,9 +117,13 @@ def ax_set_log_scale(ax, m1=False):
         ax.set_yscale("log")
 
 
-def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
-    agg = make_agg(RUN_NAME).query("ensemble_size <= 40")
-    kinds = ["boot", "bootrp"]
+def plot_frontier_and_heatmaps(
+    p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95]), agg=None, kinds=None, plot_name=None
+):
+    if agg is None:
+        agg = make_agg(RUN_NAME).query("ensemble_size <= 40")
+    if kinds is None:
+        kinds = ["boot", "bootrp"]
 
     cmap = sns.color_palette("Blues", as_cmap=True)
     norm = plt.Normalize(0, 1)
@@ -242,7 +246,10 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
     )
     cbar.set_label("Probability of Discovery (PoD)", rotation=270, labelpad=18)
 
-    plot_save("frontier_and_heatmaps")
+    if plot_name is not None:
+        plot_save(f"frontier_and_heatmaps_{plot_name}")
+    else:
+        plot_save("frontier_and_heatmaps")
 
 
 def _fit_beta(df: pd.DataFrame, kind: str):
@@ -445,14 +452,16 @@ def plot_diversity_collapse():
     plot_save("collapse")
 
 
+hp_and_ranges = [
+    ("rb_size", [5_000, 20_000, 40_000], ["boot", "bootrp"]),
+    ("lr", [8e-5, 5e-4, 1e-3], ["boot", "bootrp"]),
+    ("prior_scale", [1.0, 5.0, 10.0], ["bootrp"]),
+]
+
+
 def plot_hyperparameter_sweep():
     plt.style.use("seaborn-v0_8-whitegrid")
     df_agg = make_agg("sweep")
-    hp_and_ranges = [
-        ("rb_size", [5_000, 20_000, 40_000], ["boot", "bootrp"]),
-        ("lr", [8e-5, 5e-4, 1e-3], ["boot", "bootrp"]),
-        ("prior_scale", [1.0, 5.0, 10.0], ["bootrp"]),
-    ]
 
     fig = plt.figure(figsize=(5.5, 2.2))
     gs = gridspec.GridSpec(
@@ -560,4 +569,8 @@ if __name__ == "__main__":
     plot_hyperparameter_sweep()
     plot_diversity_collapse()
     plot_residuals()
-    plot_frontier_and_heatmaps()
+    for hp, values, kinds in hp_and_ranges:
+        for v in values:
+            plot_frontier_and_heatmaps(
+                agg=make_agg("sweep").query(f"{hp} == {v}"), kinds=kinds, plot_name=f"{hp}_eq_{v}"
+            )
