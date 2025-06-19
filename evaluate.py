@@ -172,9 +172,8 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
             c=df["weak_convergence"],
             cmap=cmap,
             norm=norm,
-            s=15,
+            s=10,
             edgecolor="black",
-            rasterized=True,
         )
 
         beta, *_ = _fit_beta(df, kind)
@@ -193,6 +192,12 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
         ax_front[i].set_xlabel("Ensemble Size, K")
         if i == 0:
             ax_front[i].set_ylabel("Hardness, n")
+        ax_front[i].set_xscale("log")
+        ax_front[i].set_yscale("log")
+        ax_front[i].set_xticks([1, 2, 4, 8, 16, 32])
+        ax_front[i].set_xticklabels([1, 2, 4, 8, 16, 32])
+        ax_front[i].set_yticks([8, 12, 16, 24, 32])
+        ax_front[i].set_yticklabels([8, 12, 16, 24, 32])
 
         name = "BDQN" if kind == "boot" else "RP-BDQN"
         ax_front[i].set_title(f"{name} PoD vs $1-(1-{beta:.2f}^n)^K$")
