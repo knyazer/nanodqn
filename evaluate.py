@@ -116,9 +116,9 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
     hard_min, hard_max = agg["hardness"].agg(["min", "max"])
 
     # ------------- layout: 3 × 2 gridspec -----------------------------------
-    fig = plt.figure(figsize=(5.5, 4.2), tight_layout=True)
+    fig = plt.figure(figsize=(5.5, 5.2), tight_layout=True)
     gs = gridspec.GridSpec(
-        3, 2, height_ratios=[10, 10, 1.5], left=0.05, right=0.95, top=0.95, bottom=0.05
+        3, 2, height_ratios=[10, 10, 1], left=0.05, right=0.95, top=0.95, bottom=0.05
     )
 
     ax_heat = [fig.add_subplot(gs[0, c]) for c in range(2)]
@@ -150,13 +150,16 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
         # tidy tick labels
         wanted_x = [5, 10, 15, 20, 25, 30, 35, 40]
         ax_heat[i].set_xticks(wanted_x)
+        ax_heat[i].set_xticklabels(wanted_x)
         start_h = (hard_min // 5) * 5
         wanted_y = np.arange(start_h, hard_max + 5, 5)
         have_y = [h for h in wanted_y if h in ui]
         ax_heat[i].set_yticks([np.where(ui == h)[0][0] + 0.5 for h in have_y])
         ax_heat[i].set_yticklabels(have_y)
+
         ax_heat[i].invert_yaxis()
         ax_heat[i].set_xlabel("")
+
         if i == 0:
             ax_heat[i].set_ylabel("Hardness, n")
         else:
@@ -193,11 +196,8 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
         if i == 0:
             ax_front[i].set_ylabel("Hardness, n")
         ax_front[i].set_xscale("log")
-        ax_front[i].set_yscale("log")
         ax_front[i].set_xticks([1, 2, 4, 8, 16, 32])
         ax_front[i].set_xticklabels([1, 2, 4, 8, 16, 32])
-        ax_front[i].set_yticks([8, 12, 16, 24, 32])
-        ax_front[i].set_yticklabels([8, 12, 16, 24, 32])
 
         name = "BDQN" if kind == "boot" else "RP-BDQN"
         ax_front[i].set_title(f"{name} PoD vs $1-(1-{beta:.2f}^n)^K$")
@@ -235,13 +235,16 @@ def plot_frontier_and_heatmaps(p_levels=np.array([0.05, 0.2, 0.5, 0.8, 0.95])):
 def _fit_beta(df: pd.DataFrame, kind: str):
     df = df[df["ensemble_size"] > 1]
 
-    def loss(b):
-        if b <= 0 or b >= 1:
+    def negloglike(beta):
+        if beta <= 0 or beta >= 1:
             return 1e18
-        p_hat = 1 - (1 - b ** df["hardness"]) ** df["ensemble_size"]
-        return np.mean((p_hat - df["weak_convergence"]) ** 2)
+        p = 1 - (1 - beta ** df["hardness"]) ** df["ensemble_size"]
+        p = np.clip(p, 1e-15, 1 - 1e-15)  # prevent log(0)
+        k = df["weak_convergence"] * 32  # successes out of 32 trials
+        n = 32
+        return -np.sum(k * np.log(p) + (n - k) * np.log1p(-p))
 
-    res = minimize_scalar(loss, bounds=(1e-6, 1 - 1e-6), method="bounded")
+    res = minimize_scalar(negloglike, bounds=(1e-6, 1 - 1e-6), method="bounded")
     beta = res.x
 
     # compute predicted vs observed
