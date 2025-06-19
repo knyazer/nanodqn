@@ -430,7 +430,7 @@ def plot_diversity_collapse():
     ax.set_xlabel("Training Episodes")
     ax.set_ylabel("Q-Diversity (higher is better)")
     ax.tick_params(axis="both", which="major")
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=4)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=2)
     ax.grid(True, which="both", linestyle=":", linewidth=0.6)
     ax.set_yscale("log")
 
@@ -446,6 +446,7 @@ def plot_diversity_collapse():
 
 
 def plot_hyperparameter_sweep():
+    plt.style.use("seaborn-v0_8-whitegrid")
     df_agg = make_agg("sweep")
     hp_and_ranges = [
         ("rb_size", [5_000, 20_000, 40_000], ["boot", "bootrp"]),
