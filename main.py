@@ -9,25 +9,21 @@ import numpy as np
 from jax import random as jr
 from jax import numpy as jnp
 import jax
-from jaxtyping import PRNGKeyArray, Float, Array
+from jaxtyping import PRNGKeyArray
 import gymnax
 from replay_buffer import ReplayBuffer
 from tqdm import tqdm as tqdm
 import optax
-import random
-import wandb
 import os
 import pandas as pd
 import yaml
 import dataclasses
 import hashlib
 import json
-import time
 from pathlib import Path
 from models import (
     Model,
     ModelWithPrior,
-    DQN,
     Bootstrapped,
     EpsilonGreedy,
 )

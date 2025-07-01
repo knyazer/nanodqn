@@ -2,22 +2,14 @@ from math import sqrt
 from pathlib import Path
 import pandas as pd
 import numpy as np
-from mpl_toolkits.axes_grid1 import make_axes_locatable
 import matplotlib.pyplot as plt
 import dataclasses
-from matplotlib.patches import Rectangle
-from scipy.stats import binomtest
 import seaborn as sns
 import yaml
 import functools as ft
-from typing import Literal
 from scipy.optimize import minimize_scalar
 from helpers import df_from, RUN_NAME
-import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-import seaborn as sns
-from matplotlib.patches import Rectangle
 
 plt.rcParams.update({"font.size": 7})
 # This is the most important part.
@@ -76,7 +68,7 @@ def make_agg(version):
             }
         if ver == 3:
             if df["weak_convergence"].sum() != 0:
-                conv = np.vstack(df[df["weak_convergence"] == True]["collapse_metric"].to_numpy())
+                conv = np.vstack(df[df["weak_convergence"] == True]["collapse_metric"].to_numpy())  # noqa
                 row = {
                     **row,
                     "collapse_metric_mean_converged": conv.mean(axis=0),
@@ -84,7 +76,7 @@ def make_agg(version):
                 }
             if df["weak_convergence"].prod() == 0:
                 unconv = np.vstack(
-                    df[df["weak_convergence"] == False]["collapse_metric"].to_numpy()
+                    df[df["weak_convergence"] == False]["collapse_metric"].to_numpy()  # noqa
                 )
                 row = {
                     **row,
@@ -189,7 +181,7 @@ def plot_frontier_and_heatmaps(
         )
 
         # ---- frontier (middle row)
-        sc = ax_front[i].scatter(
+        ax_front[i].scatter(
             df["ensemble_size"],
             df["hardness"],
             c=df["weak_convergence"],
@@ -324,7 +316,7 @@ def _fit_psi(df: pd.DataFrame, kind: str, bootstrap_uncertainty: bool = False):
 
     if bootstrap_uncertainty:
         # Bootstrap resampling
-        n_bootstrap = 50
+        n_bootstrap = 100
         bootstrap_psis = []
 
         for _ in range(n_bootstrap):
@@ -336,8 +328,8 @@ def _fit_psi(df: pd.DataFrame, kind: str, bootstrap_uncertainty: bool = False):
         bootstrap_psis = np.array(bootstrap_psis)
 
         # Compute 80% confidence interval (10th and 90th percentiles)
-        ci_lower = np.percentile(bootstrap_psis, 10)
-        ci_upper = np.percentile(bootstrap_psis, 90)
+        ci_lower = np.percentile(bootstrap_psis, 2.5)
+        ci_upper = np.percentile(bootstrap_psis, 97.5)
 
         return psi, mse, dispersion_factor, r2, (ci_lower, ci_upper)
     else:
@@ -495,7 +487,7 @@ def plot_diversity_collapse():
 
     # 4. Final plot styling for publication
     ax.set_xlabel("Training Episodes")
-    ax.set_ylabel("Q-Diversity (higher is better)")
+    ax.set_ylabel("Q-Diversity")
     ax.tick_params(axis="both", which="major")
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=2)
     ax.grid(True, which="both", linestyle=":", linewidth=0.6)
@@ -630,7 +622,7 @@ def plot_hyperparameter_sweep():
     # Get handles and labels from the first axis that has both kinds
     handles, labels = None, None
     for ax in axes:
-        h, l = ax.get_legend_handles_labels()
+        h, l = ax.get_legend_handles_labels()  # noqa
         if len(h) >= 2:  # Found axis with both BDQN and RP-BDQN
             handles, labels = h, l
             break

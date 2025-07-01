@@ -1,4 +1,4 @@
-from typing import Dict, NamedTuple, Any, Tuple
+from typing import Any
 import equinox as eqx
 import jax
 from jax import numpy as jnp
