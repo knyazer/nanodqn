@@ -10,3 +10,4 @@ plots/pdf
 *csv
 .jax_cache
 .*.bck
+.claude

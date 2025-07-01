@@ -1,9 +1,9 @@
 [project]
-name = "unified-bootstrapped-dqn-scaling"
+name = "soft-priors-bootstrapped-dqn"
 version = "1.0.0"
 authors = [{ name="Roman Knyazhitskiy", email="dqn.scaling.laws@knyaz.tech" }]
 license = "MIT"
-description = "Official implementation of 'A Unified Scaling Law for Bootstrapped DQNs'"
+description = "Official implementation of 'Soft Priors for Bootstrapped DQN' (AAAI 2026)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

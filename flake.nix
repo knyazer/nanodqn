@@ -1,5 +1,5 @@
 {
-  description = "A Unified Scaling Law of Bootstrapped DQNs";
+  description = "Soft Priors for Bootstrapped DQN (AAAI 2026)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -68,7 +68,7 @@
 
         # Package definition
         packages.default = python.pkgs.buildPythonPackage rec {
-          pname = "unified-bootstrapped-dqn-scaling";
+          pname = "soft-priors-bootstrapped-dqn";
           version = "1.0.0";
 
           src = ./.;
@@ -81,7 +81,7 @@
           doCheck = false;
 
           meta = with pkgs.lib; {
-            description = "Official implementation of 'A Unified Scaling Law for Bootstrapped DQNs'";
+            description = "Official implementation of 'Soft Priors for Bootstrapped DQN' (AAAI 2026)";
             license = licenses.mit;
             maintainers = [
               {
